@@ -3,6 +3,8 @@ name = "sigmf"
 version = "0.1.0"
 authors = ["Alex Khamutov <alex.khamutov@gmail.com>"]
 edition = "2021"
+license = "MIT"
+description = "A Rust library for interacting with SigMF recordings,"
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
