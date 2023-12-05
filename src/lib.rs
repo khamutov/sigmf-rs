@@ -94,6 +94,22 @@ pub mod sigmf {
         center_frequency: f64,
         sample_rate: f64,
     }
+
+    #[derive(Debug, PartialEq, Deserialize, Serialize)]
+    pub struct AntennaGlobal {
+        #[serde(rename = "antenna:model")]
+        pub model: String,
+        #[serde(rename = "antenna:type")]
+        pub antenna_type: Option<String>,
+    }
+
+    impl GlobalMetadata {
+        pub fn get_extension<T: serde::de::DeserializeOwned>(
+            &self,
+        ) -> Result<T, serde_json::Error> {
+            serde_json::from_value(serde_json::json!(self.other.clone()))
+        }
+    }
 }
 
 #[cfg(test)]
