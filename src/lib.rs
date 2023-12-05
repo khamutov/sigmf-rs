@@ -37,6 +37,13 @@ pub mod sigmf {
         pub global: GlobalMetadata,
     }
 
+    impl Metadata {
+        pub fn from_str(s: &str) -> Result<Self, Box<dyn Error>> {
+            let metadata = serde_json::from_str(s)?;
+            Ok(metadata)
+        }
+    }
+
     #[derive(Debug, PartialEq, Deserialize, Serialize)]
     pub struct GlobalMetadata {
         #[serde(rename = "core:datatype")]
