@@ -93,7 +93,8 @@ fn test_parse_metadata_with_antenna() -> Result<(), Box<dyn Error>> {
         metadata.global.get_extension::<AntennaGlobal>()?,
         AntennaGlobal {
             model: "ARA CSB-16".to_string(),
-            antenna_type: Some("dipole".to_string())
+            antenna_type: Some("dipole".to_string()),
+            ..Default::default()
         }
     );
     Ok(())

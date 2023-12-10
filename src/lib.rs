@@ -226,6 +226,80 @@ pub mod sigmf {
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "antenna:type")]
         pub antenna_type: Option<String>,
+
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(rename = "antenna:low_frequency")]
+        pub low_frequency: Option<f64>,
+
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(rename = "antenna:high_frequency")]
+        pub high_frequency: Option<f64>,
+
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(rename = "antenna:gain")]
+        pub gain: Option<f64>,
+
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(rename = "antenna:horizontal_gain_pattern")]
+        pub horizontal_gain_pattern: Option<Vec<f64>>,
+
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(rename = "antenna:vertical_gain_pattern")]
+        pub vertical_gain_pattern: Option<Vec<f64>>,
+
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(rename = "antenna:horizontal_beam_width")]
+        pub horizontal_beam_width: Option<f64>,
+
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(rename = "antenna:vertical_beam_width")]
+        pub vertical_beam_width: Option<f64>,
+
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(rename = "antenna:cross_polar_discrimination")]
+        pub cross_polar_discrimination: Option<f64>,
+
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(rename = "antenna:voltage_standing_wave_ratio")]
+        pub voltage_standing_wave_ratio: Option<f64>,
+
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(rename = "antenna:cable_loss")]
+        pub cable_loss: Option<f64>,
+
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(rename = "antenna:steerable")]
+        pub steerable: Option<bool>,
+
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(rename = "antenna:mobile")]
+        pub mobile: Option<bool>,
+
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(rename = "antenna:hagl")]
+        pub hagl: Option<f64>,
+    }
+
+    impl Default for AntennaGlobal {
+        fn default() -> AntennaGlobal {
+            AntennaGlobal {
+                model: "".to_string(),
+                antenna_type: None,
+                low_frequency: None,
+                high_frequency: None,
+                gain: None,
+                horizontal_gain_pattern: None,
+                vertical_gain_pattern: None,
+                horizontal_beam_width: None,
+                vertical_beam_width: None,
+                cross_polar_discrimination: None,
+                voltage_standing_wave_ratio: None,
+                cable_loss: None,
+                steerable: None,
+                mobile: None,
+                hagl: None,
+            }
+        }
     }
 
     impl GlobalExtension for AntennaGlobal {
