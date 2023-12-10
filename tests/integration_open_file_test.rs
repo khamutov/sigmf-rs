@@ -25,10 +25,10 @@ fn test_open_file() -> Result<(), Box<dyn Error>> {
             geolocation: None,
             extensions: None,
             collection: None,
-            metadata_only: None,
-            dataset: None,
-            trailing_bytes: None,
-            other: BTreeMap::from([("my_ns:some_prop".to_string(), serde_json::value::Value::String("custom_val".to_string()) )]),
+            metadata_only: None, dataset: None, trailing_bytes: None, other: BTreeMap::from([(
+                "my_ns:some_prop".to_string(),
+                serde_json::value::Value::String("custom_val".to_string())
+            )]),
         }
     );
     Ok(())

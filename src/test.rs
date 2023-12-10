@@ -6,26 +6,26 @@ use crate::sigmf::*;
 #[test]
 fn test_parse_metadata() -> Result<(), Box<dyn Error>> {
     let json_data = r#"
-    {
-        "global": {
-            "core:datatype": "rf32_le",
-            "core:num_channels": 1,
-            "core:sha512": "f4984",
-            "core:version": "1.0.0",
-            "my_ns:some_prop": "custom_val"
-        },
-        "captures": [
-            {
-                "core:sample_start": 0
-            }
-        ],
-        "annotations": [
-            {
-                "core:sample_count": 16,
-                "core:sample_start": 0
-            }
-        ]
-    }"#;
+  {
+      "global": {
+          "core:datatype": "rf32_le",
+          "core:num_channels": 1,
+          "core:sha512": "f4984",
+          "core:version": "1.0.0",
+          "my_ns:some_prop": "custom_val"
+      },
+      "captures": [
+          {
+              "core:sample_start": 0
+          }
+      ],
+      "annotations": [
+          {
+              "core:sample_count": 16,
+              "core:sample_start": 0
+          }
+      ]
+  }"#;
     let metadata = Metadata::from_str(json_data)?;
     assert_eq!(
         metadata.global,
@@ -124,5 +124,32 @@ fn test_parse_metadata_with_antenna() -> Result<(), Box<dyn Error>> {
             antenna_type: Some("dipole".to_string())
         }
     );
+    Ok(())
+}
+
+#[test]
+fn test_parse_roundtrip() -> Result<(), Box<dyn Error>> {
+    let json_data = r#"{
+  "global": {
+    "core:datatype": "rf32_le",
+    "core:version": "1.0.0",
+    "core:num_channels": 1,
+    "core:sha512": "f4984",
+    "my_ns:some_prop": "custom_val"
+  },
+  "captures": [
+    {
+      "core:sample_start": 0
+    }
+  ],
+  "annotations": [
+    {
+      "core:sample_start": 0,
+      "core:sample_count": 16
+    }
+  ]
+}"#;
+    let metadata = Metadata::from_str(json_data)?;
+    assert_eq!(metadata.to_str()?, json_data);
     Ok(())
 }
