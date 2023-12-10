@@ -32,27 +32,13 @@ fn test_parse_metadata() -> Result<(), Box<dyn Error>> {
         GlobalMetadata {
             version: "1.0.0".to_string(),
             datatype: "rf32_le".to_string(),
-            sample_rate: None,
             num_channels: Some(1),
             sha512: Some("f4984".to_string()),
-            offset: None,
-            description: None,
-            author: None,
-            meta_doi: None,
-            data_doi: None,
-            recorder: None,
-            license: None,
-            hw: None,
-            geolocation: None,
-            extensions: None,
-            collection: None,
-            metadata_only: None,
-            dataset: None,
-            trailing_bytes: None,
             other: BTreeMap::from([(
                 "my_ns:some_prop".to_string(),
                 serde_json::value::Value::String("custom_val".to_string())
             )]),
+            ..Default::default()
         }
     );
     Ok(())
@@ -88,23 +74,8 @@ fn test_parse_metadata_with_antenna() -> Result<(), Box<dyn Error>> {
         GlobalMetadata {
             version: "1.0.0".to_string(),
             datatype: "rf32_le".to_string(),
-            sample_rate: None,
             num_channels: Some(1),
             sha512: Some("f4984".to_string()),
-            offset: None,
-            description: None,
-            author: None,
-            meta_doi: None,
-            data_doi: None,
-            recorder: None,
-            license: None,
-            hw: None,
-            geolocation: None,
-            extensions: None,
-            collection: None,
-            metadata_only: None,
-            dataset: None,
-            trailing_bytes: None,
             other: BTreeMap::from([
                 (
                     "antenna:model".to_string(),
@@ -115,6 +86,7 @@ fn test_parse_metadata_with_antenna() -> Result<(), Box<dyn Error>> {
                     serde_json::value::Value::String("dipole".to_string())
                 )
             ]),
+            ..Default::default()
         }
     );
     assert_eq!(
@@ -151,5 +123,65 @@ fn test_parse_roundtrip() -> Result<(), Box<dyn Error>> {
 }"#;
     let metadata = Metadata::from_str(json_data)?;
     assert_eq!(metadata.to_str()?, json_data);
+    Ok(())
+}
+
+#[test]
+fn test_parse_roundtrip_with_extention() -> Result<(), Box<dyn Error>> {
+    let json_data = r#"{
+  "global": {
+    "core:datatype": "rf32_le",
+    "core:version": "1.0.0",
+    "antenna:model": "ARA CSB-16",
+    "antenna:type": "dipole"
+  },
+  "captures": [],
+  "annotations": []
+}"#;
+    let json_expected = r#"{
+  "global": {
+    "core:datatype": "rf32_le",
+    "core:version": "1.0.0",
+    "antenna:model": "new model"
+  },
+  "captures": [],
+  "annotations": []
+}"#;
+    let mut metadata = Metadata::from_str(json_data)?;
+
+    let mut antenna: AntennaGlobal = metadata.global.get_extension()?;
+    antenna.model = "new model".to_string();
+    antenna.antenna_type = None;
+    metadata.global.set_extension(antenna)?;
+
+    assert_eq!(metadata.to_str()?, json_expected);
+    Ok(())
+}
+
+#[test]
+fn test_parse_roundtrip_with_extention_removal() -> Result<(), Box<dyn Error>> {
+    let json_data = r#"{
+  "global": {
+    "core:datatype": "rf32_le",
+    "core:version": "1.0.0",
+    "antenna:model": "ARA CSB-16",
+    "antenna:type": "dipole"
+  },
+  "captures": [],
+  "annotations": []
+}"#;
+    let json_expected = r#"{
+  "global": {
+    "core:datatype": "rf32_le",
+    "core:version": "1.0.0"
+  },
+  "captures": [],
+  "annotations": []
+}"#;
+    let mut metadata = Metadata::from_str(json_data)?;
+
+    metadata.global.delete_extension::<AntennaGlobal>()?;
+
+    assert_eq!(metadata.to_str()?, json_expected);
     Ok(())
 }

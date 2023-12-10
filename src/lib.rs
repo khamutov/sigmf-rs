@@ -4,8 +4,10 @@ const SIGMF_DATASET_EXT: &'static str = ".sigmf-data";
 const SIGMF_COLLECTION_EXT: &'static str = ".sigmf-collection";
 
 pub mod sigmf {
+    use core::fmt::Debug;
     use serde_json::Value;
     use std::collections::BTreeMap as Map;
+    use std::fmt;
     use std::{
         error::Error,
         fs,
@@ -51,65 +53,109 @@ pub mod sigmf {
         }
     }
 
-    #[derive(Debug, PartialEq, Deserialize, Serialize)]
+    #[derive(Debug, Deserialize, Serialize)]
     pub struct GlobalMetadata {
         #[serde(rename = "core:datatype")]
         pub datatype: String,
+
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "core:sample_rate")]
         pub sample_rate: Option<f64>,
+
         #[serde(rename = "core:version")]
         pub version: String,
+
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "core:num_channels")]
         pub num_channels: Option<u64>,
+
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "core:sha512")]
         pub sha512: Option<String>,
+
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "core:offset")]
         pub offset: Option<u64>,
+
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "core:description")]
         pub description: Option<String>,
+
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "core:author")]
         pub author: Option<String>,
+
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "core:meta_doi")]
         pub meta_doi: Option<String>,
+
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "core:data_doi")]
         pub data_doi: Option<String>,
+
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "core:recorder")]
         pub recorder: Option<String>,
+
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "core:license")]
         pub license: Option<String>,
+
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "core:hw")]
         pub hw: Option<String>,
+
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "core:geolocation")]
         pub geolocation: Option<String>,
+
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "core:collection")]
         pub extensions: Option<String>,
+
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "core:collection")]
         pub collection: Option<String>,
+
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "core:metadata_only")]
         pub metadata_only: Option<bool>,
+
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "core:dataset")]
         pub dataset: Option<String>,
+
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "core:trailing_bytes")]
         pub trailing_bytes: Option<u64>,
+
         #[serde(flatten)]
         pub other: Map<String, Value>,
+    }
+
+    impl PartialEq for GlobalMetadata {
+        fn eq(&self, other: &Self) -> bool {
+            self.datatype == other.datatype
+                && self.sample_rate == other.sample_rate
+                && self.version == other.version
+                && self.num_channels == other.num_channels
+                && self.sha512 == other.sha512
+                && self.offset == other.offset
+                && self.description == other.description
+                && self.author == other.author
+                && self.meta_doi == other.meta_doi
+                && self.data_doi == other.data_doi
+                && self.recorder == other.recorder
+                && self.license == other.license
+                && self.hw == other.hw
+                && self.geolocation == other.geolocation
+                && self.extensions == other.extensions
+                && self.collection == other.collection
+                && self.metadata_only == other.metadata_only
+                && self.dataset == other.dataset
+                && self.trailing_bytes == other.trailing_bytes
+                && self.other == other.other
+        }
     }
 
     #[derive(Debug, PartialEq, Deserialize, Serialize)]
@@ -168,19 +214,111 @@ pub mod sigmf {
         pub uuid: Option<String>,
     }
 
+    pub trait GlobalExtension {
+        fn namespace() -> String;
+    }
+
     #[derive(Debug, PartialEq, Deserialize, Serialize)]
     pub struct AntennaGlobal {
         #[serde(rename = "antenna:model")]
         pub model: String,
+
+        #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "antenna:type")]
         pub antenna_type: Option<String>,
     }
 
+    impl GlobalExtension for AntennaGlobal {
+        fn namespace() -> String {
+            return "antenna".to_string();
+        }
+    }
+
+    #[derive(Debug)]
+    pub enum MetadataError {
+        Internal(String),
+        Serde(serde_json::Error),
+    }
+
+    impl fmt::Display for MetadataError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                MetadataError::Internal(err_msg) => {
+                    write!(f, "Internal error: {}", err_msg)
+                }
+                MetadataError::Serde(e) => <&serde_json::Error as std::fmt::Display>::fmt(&e, f),
+            }
+        }
+    }
+
+    impl Error for MetadataError {
+        fn source(&self) -> Option<&(dyn Error + 'static)> {
+            None
+        }
+    }
+
     impl GlobalMetadata {
-        pub fn get_extension<T: serde::de::DeserializeOwned>(
+        pub fn get_extension<T: GlobalExtension + serde::de::DeserializeOwned>(
             &self,
         ) -> Result<T, serde_json::Error> {
-            serde_json::from_value(serde_json::json!(self.other.clone()))
+            serde_json::from_value(serde_json::json!(self.other))
+        }
+
+        pub fn set_extension<T: GlobalExtension + serde::Serialize>(
+            &mut self,
+            val: T,
+        ) -> Result<(), MetadataError> {
+            match serde_json::to_value(val) {
+                Ok(serialized) => match serialized {
+                    Value::Object(d) => {
+                        let namespace_pattern = T::namespace() + ":";
+                        self.other
+                            .retain(|k, _| !k.starts_with(namespace_pattern.as_str()));
+                        self.other.extend(d);
+                        Ok(())
+                    }
+                    _ => Err(MetadataError::Internal(
+                        "unknown serialized message type".to_string(),
+                    )),
+                },
+                Err(e) => Err(MetadataError::Serde(e)),
+            }
+        }
+
+        pub fn delete_extension<T: GlobalExtension + serde::Serialize>(
+            &mut self,
+        ) -> Result<(), MetadataError> {
+            let namespace_pattern = T::namespace() + ":";
+            self.other
+                .retain(|k, _| !k.starts_with(namespace_pattern.as_str()));
+            Ok(())
+        }
+    }
+
+    impl Default for GlobalMetadata {
+        fn default() -> GlobalMetadata {
+            GlobalMetadata {
+                version: "".to_string(),
+                datatype: "".to_string(),
+                sample_rate: None,
+                num_channels: None,
+                sha512: None,
+                offset: None,
+                description: None,
+                author: None,
+                meta_doi: None,
+                data_doi: None,
+                recorder: None,
+                license: None,
+                hw: None,
+                geolocation: None,
+                extensions: None,
+                collection: None,
+                metadata_only: None,
+                dataset: None,
+                trailing_bytes: None,
+                other: Map::new(),
+            }
         }
     }
 }
