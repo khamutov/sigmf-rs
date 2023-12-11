@@ -186,3 +186,42 @@ fn test_parse_roundtrip_with_extention_removal() -> Result<(), Box<dyn Error>> {
     assert_eq!(metadata.to_str()?, json_expected);
     Ok(())
 }
+
+macro_rules! assert_full_parsed_and_eq {
+    ($r:expr, $o:expr $(,)?) => {
+        assert_full_parsed_and_eq!($r, $o, "parser didn't fully parsed");
+    };
+    ($r:expr, $o:expr, $($arg:tt)+) => ({
+        if let ::std::result::Result::Ok((i, o)) = $r {
+            assert!(i.is_empty());
+            assert_eq!(o, $o);
+        } else {
+            assert!(false, $($arg)+);
+        }
+    })
+}
+
+#[test]
+fn test_parse_data_format() {
+    assert_full_parsed_and_eq!(
+        parse_data_format("cf32_le"),
+        DataFormat {
+            number_type: NumberType::Complex,
+            data_type: DataType::F32(Endianess::LittleEndian)
+        }
+    );
+    assert_full_parsed_and_eq!(
+        parse_data_format("ru16_be"),
+        DataFormat {
+            number_type: NumberType::Real,
+            data_type: DataType::U16(Endianess::BigEndian)
+        }
+    );
+    assert_full_parsed_and_eq!(
+        parse_data_format("cu8"),
+        DataFormat {
+            number_type: NumberType::Complex,
+            data_type: DataType::U8
+        }
+    );
+}

@@ -395,6 +395,107 @@ pub mod sigmf {
             }
         }
     }
+
+    #[derive(Debug, PartialEq)]
+    pub enum Endianess {
+        BigEndian,
+        LittleEndian,
+    }
+
+    #[derive(Debug, PartialEq)]
+    pub enum DataType {
+        F32(Endianess),
+        F64(Endianess),
+        I32(Endianess),
+        I16(Endianess),
+        U32(Endianess),
+        U16(Endianess),
+        I8,
+        U8,
+    }
+
+    #[derive(Debug, PartialEq)]
+    pub enum NumberType {
+        Real,
+        Complex,
+    }
+
+    #[derive(Debug, PartialEq)]
+    pub struct DataFormat {
+        pub number_type: NumberType,
+        pub data_type: DataType,
+    }
+
+    enum ParserState {
+        F32,
+        F64,
+        I32,
+        I16,
+        U32,
+        U16,
+    }
+
+    impl ParserState {
+        fn to_data_type(&self, endianess: Endianess) -> DataType {
+            match self {
+                ParserState::F32 => DataType::F32(endianess),
+                ParserState::F64 => DataType::F64(endianess),
+                ParserState::I32 => DataType::I32(endianess),
+                ParserState::I16 => DataType::I16(endianess),
+                ParserState::U32 => DataType::U32(endianess),
+                ParserState::U16 => DataType::U16(endianess),
+            }
+        }
+    }
+
+    fn parse_real(input: &str) -> nom::IResult<&str, NumberType> {
+        nom::combinator::map(nom::bytes::complete::tag("r"), |_| NumberType::Real)(input)
+    }
+
+    fn parse_complex(input: &str) -> nom::IResult<&str, NumberType> {
+        nom::combinator::map(nom::bytes::complete::tag("c"), |_| NumberType::Complex)(input)
+    }
+
+    fn parse_type(input: &str) -> nom::IResult<&str, DataType> {
+        let (input, data_type) = nom::branch::alt((
+            nom::combinator::map(nom::bytes::complete::tag("f32"), |_| ParserState::F32),
+            nom::combinator::map(nom::bytes::complete::tag("f64"), |_| ParserState::F64),
+            nom::combinator::map(nom::bytes::complete::tag("i32"), |_| ParserState::I32),
+            nom::combinator::map(nom::bytes::complete::tag("i16"), |_| ParserState::I16),
+            nom::combinator::map(nom::bytes::complete::tag("u32"), |_| ParserState::U32),
+            nom::combinator::map(nom::bytes::complete::tag("u16"), |_| ParserState::U16),
+        ))(input)?;
+        let (input, endianess) = nom::branch::alt((
+            nom::combinator::map(nom::bytes::complete::tag("_le"), |_| {
+                Endianess::LittleEndian
+            }),
+            nom::combinator::map(nom::bytes::complete::tag("_be"), |_| Endianess::BigEndian),
+        ))(input)?;
+        Ok((input, data_type.to_data_type(endianess)))
+    }
+
+    fn parse_byte(input: &str) -> nom::IResult<&str, DataType> {
+        nom::branch::alt((
+            nom::combinator::map(nom::bytes::complete::tag("i8"), |_| DataType::I8),
+            nom::combinator::map(nom::bytes::complete::tag("u8"), |_| DataType::U8),
+        ))(input)
+    }
+
+    fn parse_data_type(input: &str) -> nom::IResult<&str, DataType> {
+        nom::branch::alt((parse_type, parse_byte))(input)
+    }
+
+    pub fn parse_data_format(input: &str) -> nom::IResult<&str, DataFormat> {
+        let (input, number_type) = nom::branch::alt((parse_real, parse_complex))(input)?;
+        let (input, data_type) = parse_data_type(input)?;
+        Ok((
+            input,
+            DataFormat {
+                number_type: number_type,
+                data_type: data_type,
+            },
+        ))
+    }
 }
 
 #[cfg(test)]
