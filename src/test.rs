@@ -225,3 +225,82 @@ fn test_parse_data_format() {
         }
     );
 }
+
+#[cfg(test)]
+mod capture_tests {
+    use std::error::Error;
+
+    use crate::sigmf::Metadata;
+
+    #[test]
+    fn test_boundary_one() -> Result<(), Box<dyn Error>> {
+        let json_data = r#"{
+            "global": {
+                "core:datatype": "rf32_le",
+                "core:version": "1.0.0",
+                "core:num_channels": 1
+            },
+            "captures": [
+                {
+                    "core:sample_start": 0
+                }
+            ],
+            "annotations": []
+        }"#;
+        let metadata = Metadata::from_str(json_data)?;
+
+        assert_eq!(metadata.captures[0].byte_boundaries, (0, 0));
+        Ok(())
+    }
+
+    #[test]
+    fn test_boundary_multiple() -> Result<(), Box<dyn Error>> {
+        let json_data = r#"{
+            "global": {
+                "core:datatype": "cf32_le",
+                "core:version": "1.0.0",
+                "core:num_channels": 1
+            },
+            "captures": [
+                {
+                    "core:sample_start": 0
+                },
+                {
+                    "core:sample_start": 500
+                }
+            ],
+            "annotations": []
+        }"#;
+        let metadata = Metadata::from_str(json_data)?;
+
+        assert_eq!(metadata.captures[1].byte_boundaries, (4000, 0));
+        Ok(())
+    }
+
+    #[test]
+    fn test_boundary_with_header() -> Result<(), Box<dyn Error>> {
+        let json_data = r#"{
+            "global": {
+                "core:datatype": "cf32_le",
+                "core:version": "1.0.0",
+                "core:num_channels": 1
+            },
+            "captures": [
+                {
+                    "core:sample_start": 0,
+                    "core:header_bytes": 6
+                },
+                {
+                    "core:sample_start": 500,
+                    "core:header_bytes": 12
+                }
+            ],
+            "annotations": []
+        }"#;
+        let metadata = Metadata::from_str(json_data)?;
+
+        assert_eq!(metadata.captures[0].byte_boundaries, (6, 0));
+        assert_eq!(metadata.captures[1].byte_boundaries, (4018, 0));
+        Ok(())
+    }
+}

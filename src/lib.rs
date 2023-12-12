@@ -43,13 +43,37 @@ pub mod sigmf {
 
     impl Metadata {
         pub fn from_str(s: &str) -> Result<Self, Box<dyn Error>> {
-            let metadata = serde_json::from_str(s)?;
+            let mut metadata: Metadata = serde_json::from_str(s)?;
+            metadata.calc_capture_boundaries()?;
             Ok(metadata)
         }
 
         pub fn to_str(&self) -> Result<String, Box<dyn Error>> {
             let res = serde_json::to_string_pretty(self)?;
             Ok(res)
+        }
+
+        fn calc_capture_boundaries(&mut self) -> Result<(), MetadataError> {
+            let parsed = parse_data_format(self.global.datatype.as_str());
+            match parsed {
+                Err(_) => Err(MetadataError::Internal(
+                    "error parsing datatype".to_string(),
+                )),
+                Ok((_, data_format)) => {
+                    for capture in &mut self.captures {
+                        capture.data_format = data_format.clone();
+                    }
+                    Ok(())
+                }
+            }?;
+
+            let mut start_byte = 0;
+            for capture in &mut self.captures {
+                start_byte += capture.header_bytes.unwrap_or(0);
+                start_byte += capture.data_format.size() * capture.sample_start;
+                capture.byte_boundaries = (start_byte, 0);
+            }
+            Ok(())
         }
     }
 
@@ -178,7 +202,28 @@ pub mod sigmf {
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "core:header_bytes")]
         pub header_bytes: Option<u64>,
+
+        #[serde(skip)]
+        #[serde(default = "default_capture_boundaries")]
+        pub byte_boundaries: (u64, u64),
+
+        #[serde(skip)]
+        #[serde(default = "default_capture_data_format")]
+        pub data_format: DataFormat,
     }
+
+    fn default_capture_boundaries() -> (u64, u64) {
+        (0, 0)
+    }
+
+    fn default_capture_data_format() -> DataFormat {
+        DataFormat {
+            number_type: NumberType::Real,
+            data_type: DataType::I8,
+        }
+    }
+
+    impl CaptureMetadata {}
 
     #[derive(Debug, PartialEq, Deserialize, Serialize)]
     pub struct AnnotationMetadata {
@@ -396,13 +441,13 @@ pub mod sigmf {
         }
     }
 
-    #[derive(Debug, PartialEq)]
+    #[derive(Debug, PartialEq, Clone)]
     pub enum Endianess {
         BigEndian,
         LittleEndian,
     }
 
-    #[derive(Debug, PartialEq)]
+    #[derive(Debug, PartialEq, Clone)]
     pub enum DataType {
         F32(Endianess),
         F64(Endianess),
@@ -414,16 +459,41 @@ pub mod sigmf {
         U8,
     }
 
-    #[derive(Debug, PartialEq)]
+    impl DataType {
+        pub fn size(&self) -> u64 {
+            match self {
+                DataType::F32(_) => 4,
+                DataType::F64(_) => 8,
+                DataType::I32(_) => 4,
+                DataType::I16(_) => 2,
+                DataType::U32(_) => 4,
+                DataType::U16(_) => 2,
+                DataType::I8 => 1,
+                DataType::U8 => 1,
+            }
+        }
+    }
+
+    #[derive(Debug, PartialEq, Clone)]
     pub enum NumberType {
         Real,
         Complex,
     }
 
-    #[derive(Debug, PartialEq)]
+    #[derive(Debug, PartialEq, Clone)]
     pub struct DataFormat {
         pub number_type: NumberType,
         pub data_type: DataType,
+    }
+
+    impl DataFormat {
+        pub fn size(&self) -> u64 {
+            self.data_type.size()
+                * match self.number_type {
+                    NumberType::Real => 1,
+                    NumberType::Complex => 2,
+                }
+        }
     }
 
     enum ParserState {
