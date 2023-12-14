@@ -5,6 +5,7 @@ const SIGMF_COLLECTION_EXT: &'static str = ".sigmf-collection";
 
 pub mod sigmf {
     use core::fmt::Debug;
+    use serde_json::de::Read;
     use serde_json::Value;
     use std::collections::BTreeMap as Map;
     use std::fmt;
@@ -42,9 +43,9 @@ pub mod sigmf {
     }
 
     impl Metadata {
-        pub fn from_str(s: &str) -> Result<Self, Box<dyn Error>> {
+        pub fn from_str(s: &str, data: &Vec<u8>) -> Result<Self, Box<dyn Error>> {
             let mut metadata: Metadata = serde_json::from_str(s)?;
-            metadata.calc_capture_boundaries()?;
+            metadata.calc_capture_boundaries(data)?;
             Ok(metadata)
         }
 
@@ -53,7 +54,11 @@ pub mod sigmf {
             Ok(res)
         }
 
-        fn calc_capture_boundaries(&mut self) -> Result<(), MetadataError> {
+        fn calc_capture_boundaries(&mut self, data: &Vec<u8>) -> Result<(), MetadataError> {
+            if self.captures.is_empty() {
+                return Ok(());
+            }
+
             let parsed = parse_data_format(self.global.datatype.as_str());
             match parsed {
                 Err(_) => Err(MetadataError::Internal(
@@ -68,10 +73,34 @@ pub mod sigmf {
             }?;
 
             let mut start_byte = 0;
-            for capture in &mut self.captures {
+            let last_index = self.captures.len() - 1;
+            for index in 0..self.captures.len() {
+                let capture = &self.captures[index];
                 start_byte += capture.header_bytes.unwrap_or(0);
                 start_byte += capture.data_format.size() * capture.sample_start;
-                capture.byte_boundaries = (start_byte, 0);
+                let end_byte = if index == last_index {
+                    let last_data_byte =
+                        data.len() as i64 - self.global.trailing_bytes.unwrap_or(0) as i64;
+                    if last_data_byte < 0 {
+                        return Err(MetadataError::Internal(format!(
+                            "Trailing offset {} is bigger than data size {}",
+                            self.global.trailing_bytes.unwrap_or(0),
+                            data.len(),
+                        )));
+                    }
+                    last_data_byte as u64
+                } else {
+                    let next_capture = &self.captures[index + 1];
+                    start_byte + next_capture.data_format.size() * next_capture.sample_start as u64
+                };
+
+                if start_byte > end_byte {
+                    return Err(MetadataError::Internal(format!(
+                        "Starting offset [{}] for capture {} is bigger than data file size [{}]",
+                        start_byte, index, end_byte,
+                    )));
+                }
+                self.captures[index].byte_boundaries = (start_byte, end_byte);
             }
             Ok(())
         }

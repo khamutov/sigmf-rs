@@ -26,7 +26,8 @@ fn test_parse_metadata() -> Result<(), Box<dyn Error>> {
           }
       ]
   }"#;
-    let metadata = Metadata::from_str(json_data)?;
+    let data = vec![];
+    let metadata = Metadata::from_str(json_data, &data)?;
     assert_eq!(
         metadata.global,
         GlobalMetadata {
@@ -68,7 +69,8 @@ fn test_parse_metadata_with_antenna() -> Result<(), Box<dyn Error>> {
             }
         ]
     }"#;
-    let metadata = Metadata::from_str(json_data)?;
+    let data = vec![];
+    let metadata = Metadata::from_str(json_data, &data)?;
     assert_eq!(
         metadata.global,
         GlobalMetadata {
@@ -122,7 +124,8 @@ fn test_parse_roundtrip() -> Result<(), Box<dyn Error>> {
     }
   ]
 }"#;
-    let metadata = Metadata::from_str(json_data)?;
+    let data = vec![];
+    let metadata = Metadata::from_str(json_data, &data)?;
     assert_eq!(metadata.to_str()?, json_data);
     Ok(())
 }
@@ -148,7 +151,8 @@ fn test_parse_roundtrip_with_extention() -> Result<(), Box<dyn Error>> {
   "captures": [],
   "annotations": []
 }"#;
-    let mut metadata = Metadata::from_str(json_data)?;
+    let data = vec![];
+    let mut metadata = Metadata::from_str(json_data, &data)?;
 
     let mut antenna: AntennaGlobal = metadata.global.get_extension()?;
     antenna.model = "new model".to_string();
@@ -179,7 +183,8 @@ fn test_parse_roundtrip_with_extention_removal() -> Result<(), Box<dyn Error>> {
   "captures": [],
   "annotations": []
 }"#;
-    let mut metadata = Metadata::from_str(json_data)?;
+    let data = vec![];
+    let mut metadata = Metadata::from_str(json_data, &data)?;
 
     metadata.global.delete_extension::<AntennaGlobal>()?;
 
@@ -247,9 +252,10 @@ mod capture_tests {
             ],
             "annotations": []
         }"#;
-        let metadata = Metadata::from_str(json_data)?;
+        let data: Vec<u8> = vec![0; 8000];
+        let metadata = Metadata::from_str(json_data, &data)?;
 
-        assert_eq!(metadata.captures[0].byte_boundaries, (0, 0));
+        assert_eq!(metadata.captures[0].byte_boundaries, (0, 8000));
         Ok(())
     }
 
@@ -271,9 +277,10 @@ mod capture_tests {
             ],
             "annotations": []
         }"#;
-        let metadata = Metadata::from_str(json_data)?;
+        let data: Vec<u8> = vec![0; 8000];
+        let metadata = Metadata::from_str(json_data, &data)?;
 
-        assert_eq!(metadata.captures[1].byte_boundaries, (4000, 0));
+        assert_eq!(metadata.captures[1].byte_boundaries, (4000, 8000));
         Ok(())
     }
 
@@ -297,10 +304,90 @@ mod capture_tests {
             ],
             "annotations": []
         }"#;
-        let metadata = Metadata::from_str(json_data)?;
+        let data: Vec<u8> = vec![0; 8000];
+        let metadata = Metadata::from_str(json_data, &data)?;
 
-        assert_eq!(metadata.captures[0].byte_boundaries, (6, 0));
-        assert_eq!(metadata.captures[1].byte_boundaries, (4018, 0));
+        assert_eq!(metadata.captures[0].byte_boundaries, (6, 4006));
+        assert_eq!(metadata.captures[1].byte_boundaries, (4018, 8000));
+        Ok(())
+    }
+
+    #[test]
+    fn test_boundary_with_trailing_first_chunk() -> Result<(), Box<dyn Error>> {
+        let json_data = r#"{
+            "global": {
+                "core:datatype": "cf32_le",
+                "core:version": "1.0.0",
+                "core:num_channels": 1,
+                "core:trailing_bytes": 50
+            },
+            "captures": [
+                {
+                    "core:sample_start": 0
+                }
+            ],
+            "annotations": []
+        }"#;
+        let data: Vec<u8> = vec![0; 8000];
+        let metadata = Metadata::from_str(json_data, &data)?;
+
+        assert_eq!(metadata.captures[0].byte_boundaries, (0, 7950));
+        Ok(())
+    }
+
+    #[test]
+    fn test_boundary_with_trailing_last_chunk() -> Result<(), Box<dyn Error>> {
+        let json_data = r#"{
+            "global": {
+                "core:datatype": "cf32_le",
+                "core:version": "1.0.0",
+                "core:num_channels": 1,
+                "core:trailing_bytes": 50
+            },
+            "captures": [
+                {
+                    "core:sample_start": 0
+                },
+                {
+                    "core:sample_start": 500
+                }
+            ],
+            "annotations": []
+        }"#;
+        let data: Vec<u8> = vec![0; 8000];
+        let metadata = Metadata::from_str(json_data, &data)?;
+
+        assert_eq!(metadata.captures[0].byte_boundaries, (0, 4000));
+        assert_eq!(metadata.captures[1].byte_boundaries, (4000, 7950));
+        Ok(())
+    }
+
+    #[test]
+    fn test_boundary_with_trailing_and_header_last_chunk() -> Result<(), Box<dyn Error>> {
+        let json_data = r#"{
+            "global": {
+                "core:datatype": "cf32_le",
+                "core:version": "1.0.0",
+                "core:num_channels": 1,
+                "core:trailing_bytes": 50
+            },
+            "captures": [
+                {
+                    "core:sample_start": 0,
+                    "core:header_bytes": 6
+                },
+                {
+                    "core:sample_start": 500,
+                    "core:header_bytes": 12
+                }
+            ],
+            "annotations": []
+        }"#;
+        let data: Vec<u8> = vec![0; 8000];
+        let metadata = Metadata::from_str(json_data, &data)?;
+
+        assert_eq!(metadata.captures[0].byte_boundaries, (6, 4006));
+        assert_eq!(metadata.captures[1].byte_boundaries, (4018, 7950));
         Ok(())
     }
 }
