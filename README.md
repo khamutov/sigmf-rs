@@ -15,6 +15,15 @@ The [SigMF specification document](https://github.com/sigmf/SigMF/blob/HEAD/sigm
 - [ ] reading samples from data file
 - [ ] reading multiple channels
 - [ ] automatic searching accompanying files (e.g., open data file if metadata is provided)
+- [ ] add documentation and doc tests
+
+### Infra
+
+- [ ] run tests on CI
+- [ ] configure linters
+- [ ] add validation rules to PR
+- [ ] configure publishing to crates
+- [ ] add license info
 
 ### Later
 
