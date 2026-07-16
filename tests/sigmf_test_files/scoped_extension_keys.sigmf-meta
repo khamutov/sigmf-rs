@@ -1,0 +1,36 @@
+{
+    "global": {
+        "core:datatype": "cf32_le",
+        "core:version": "1.2.6",
+        "core:sample_rate": 32000,
+        "core:extensions": [
+            {
+                "name": "antenna",
+                "version": "1.0.0",
+                "optional": true
+            },
+            {
+                "name": "capture_details",
+                "version": "1.0.0",
+                "optional": true
+            }
+        ],
+        "my_ns:global_prop": "global_val"
+    },
+    "captures": [
+        {
+            "core:sample_start": 0,
+            "core:frequency": 16804500,
+            "antenna:azimuth_angle": 137.5,
+            "my_ns:capture_prop": "capture_val"
+        }
+    ],
+    "annotations": [
+        {
+            "core:sample_start": 0,
+            "core:sample_count": 16,
+            "capture_details:emitter": "coast-station",
+            "my_ns:annotation_prop": "annotation_val"
+        }
+    ]
+}

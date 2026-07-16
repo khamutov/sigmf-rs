@@ -1,0 +1,8 @@
+{
+    "global": {
+        "core:datatype": "cf32_le",
+        "core:version": "1.2.6"
+    },
+    "captures": [],
+    "annotations": []
+}

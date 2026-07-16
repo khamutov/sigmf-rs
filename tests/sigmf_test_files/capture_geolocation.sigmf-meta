@@ -1,0 +1,20 @@
+{
+    "global": {
+        "core:datatype": "cf32_le",
+        "core:version": "1.2.6",
+        "core:sample_rate": 32000,
+        "core:description": "Position in the Captures scope, which the schema states is the preferred location for it."
+    },
+    "captures": [
+        {
+            "core:sample_start": 0,
+            "core:frequency": 16804500,
+            "core:datetime": "2026-07-16T09:14:22.000Z",
+            "core:geolocation": {
+                "type": "Point",
+                "coordinates": [14.5053, -22.9576, 7.0]
+            }
+        }
+    ],
+    "annotations": []
+}

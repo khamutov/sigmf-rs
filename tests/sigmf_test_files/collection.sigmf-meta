@@ -1,0 +1,16 @@
+{
+    "global": {
+        "core:datatype": "cf32_le",
+        "core:version": "1.2.6",
+        "core:sample_rate": 32000,
+        "core:description": "One band of a multi-band receiver. The spec recommends Collections over core:num_channels for multiple channels of IQ, so grouping per-band Recordings this way is the recommended shape rather than a workaround.",
+        "core:collection": "walvisbay-2026-07-16T09-14-22"
+    },
+    "captures": [
+        {
+            "core:sample_start": 0,
+            "core:frequency": 16804500
+        }
+    ],
+    "annotations": []
+}

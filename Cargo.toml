@@ -17,3 +17,12 @@ nom = "7.1.3"
 
 [dev-dependencies]
 pretty_assertions = "1.4.1"
+# Validates our fixtures and our output against the SigMF specification's own
+# machine-readable definition, vendored at tests/spec/sigmf-schema.json.
+#
+# default-features = false drops resolve-http, which would let the validator
+# fetch a remote $ref over the network mid-test. The vendored schema has no
+# $refs at all, so a resolver is dead weight -- and disabling it means a future
+# schema that grows one fails loudly here instead of silently reaching the
+# network and making CI depend on sigmf/SigMF being up.
+jsonschema = { version = "0.48.0", default-features = false }

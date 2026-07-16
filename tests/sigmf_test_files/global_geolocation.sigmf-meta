@@ -1,0 +1,19 @@
+{
+    "global": {
+        "core:datatype": "cf32_le",
+        "core:version": "1.2.6",
+        "core:sample_rate": 32000,
+        "core:description": "Fixed receiving site; position in the Global scope, which the schema permits for backwards compatibility.",
+        "core:geolocation": {
+            "type": "Point",
+            "coordinates": [14.5053, -22.9576]
+        }
+    },
+    "captures": [
+        {
+            "core:sample_start": 0,
+            "core:frequency": 16804500
+        }
+    ],
+    "annotations": []
+}
