@@ -32,14 +32,13 @@ fn test_parse_metadata() -> Result<(), Box<dyn Error>> {
         metadata.global,
         GlobalMetadata {
             version: "1.0.0".to_string(),
-            datatype: "rf32_le".to_string(),
             num_channels: Some(1),
             sha512: Some("f4984".to_string()),
             other: BTreeMap::from([(
                 "my_ns:some_prop".to_string(),
                 serde_json::value::Value::String("custom_val".to_string())
             )]),
-            ..Default::default()
+            ..GlobalMetadata::new("rf32_le".parse()?)
         }
     );
     Ok(())
@@ -75,7 +74,6 @@ fn test_parse_metadata_with_antenna() -> Result<(), Box<dyn Error>> {
         metadata.global,
         GlobalMetadata {
             version: "1.0.0".to_string(),
-            datatype: "rf32_le".to_string(),
             num_channels: Some(1),
             sha512: Some("f4984".to_string()),
             other: BTreeMap::from([
@@ -88,7 +86,7 @@ fn test_parse_metadata_with_antenna() -> Result<(), Box<dyn Error>> {
                     serde_json::value::Value::String("dipole".to_string())
                 )
             ]),
-            ..Default::default()
+            ..GlobalMetadata::new("rf32_le".parse()?)
         }
     );
     assert_eq!(
@@ -192,43 +190,187 @@ fn test_parse_roundtrip_with_extention_removal() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-macro_rules! assert_full_parsed_and_eq {
-    ($r:expr, $o:expr $(,)?) => {
-        assert_full_parsed_and_eq!($r, $o, "parser didn't fully parsed");
-    };
-    ($r:expr, $o:expr, $($arg:tt)+) => ({
-        if let ::std::result::Result::Ok((i, o)) = $r {
-            assert!(i.is_empty());
-            assert_eq!(o, $o);
-        } else {
-            assert!(false, $($arg)+);
-        }
-    })
-}
+mod data_format {
+    //! `core:datatype` is a claim about the bytes, so the parse is the crate's
+    //! narrowest and most load-bearing boundary.
 
-#[test]
-fn test_parse_data_format() {
-    assert_full_parsed_and_eq!(
-        parse_data_format("cf32_le"),
-        DataFormat {
-            number_type: NumberType::Complex,
-            data_type: DataType::F32(Endianess::LittleEndian)
+    use pretty_assertions::assert_eq;
+
+    use crate::sigmf::*;
+
+    /// Every format the specification permits: two number types across six
+    /// multi-byte sample types in both byte orders, plus the two single-byte types
+    /// that have no byte order.
+    fn every_format() -> Vec<DataFormat> {
+        let mut out = Vec::new();
+        for number_type in [NumberType::Real, NumberType::Complex] {
+            for data_type in [
+                DataType::F32(Endianess::LittleEndian),
+                DataType::F32(Endianess::BigEndian),
+                DataType::F64(Endianess::LittleEndian),
+                DataType::F64(Endianess::BigEndian),
+                DataType::I32(Endianess::LittleEndian),
+                DataType::I32(Endianess::BigEndian),
+                DataType::I16(Endianess::LittleEndian),
+                DataType::I16(Endianess::BigEndian),
+                DataType::U32(Endianess::LittleEndian),
+                DataType::U32(Endianess::BigEndian),
+                DataType::U16(Endianess::LittleEndian),
+                DataType::U16(Endianess::BigEndian),
+                DataType::I8,
+                DataType::U8,
+            ] {
+                out.push(DataFormat {
+                    number_type,
+                    data_type,
+                });
+            }
         }
-    );
-    assert_full_parsed_and_eq!(
-        parse_data_format("ru16_be"),
-        DataFormat {
-            number_type: NumberType::Real,
-            data_type: DataType::U16(Endianess::BigEndian)
+        out
+    }
+
+    #[test]
+    fn parses_the_spelling_the_spec_gives() {
+        assert_eq!(
+            "cf32_le".parse::<DataFormat>().unwrap(),
+            DataFormat {
+                number_type: NumberType::Complex,
+                data_type: DataType::F32(Endianess::LittleEndian),
+            }
+        );
+        assert_eq!(
+            "ru16_be".parse::<DataFormat>().unwrap(),
+            DataFormat {
+                number_type: NumberType::Real,
+                data_type: DataType::U16(Endianess::BigEndian),
+            }
+        );
+        assert_eq!(
+            "cu8".parse::<DataFormat>().unwrap(),
+            DataFormat {
+                number_type: NumberType::Complex,
+                data_type: DataType::U8,
+            }
+        );
+    }
+
+    /// `Display` is the exact inverse of the parse, for every representable value.
+    ///
+    /// Both directions carry a hand-written table of the spec's spellings. This is
+    /// what stops them drifting apart — and what makes it safe for the write path to
+    /// derive `core:datatype` rather than accept it.
+    #[test]
+    fn display_round_trips_through_parse_for_every_format() {
+        for format in every_format() {
+            let spelled = format.to_string();
+            assert_eq!(
+                spelled.parse::<DataFormat>().unwrap(),
+                format,
+                "{spelled} did not survive a Display -> parse round-trip"
+            );
         }
-    );
-    assert_full_parsed_and_eq!(
-        parse_data_format("cu8"),
-        DataFormat {
-            number_type: NumberType::Complex,
-            data_type: DataType::U8
+        assert_eq!(every_format().len(), 28);
+    }
+
+    /// The parse consumes its whole input.
+    ///
+    /// The schema's own regex does not: `^(c|r)(f32|...)(_le|_be)?` carries no `$`
+    /// anchor, so `cf32_le_GARBAGE` satisfies it by matching a prefix. The oracle
+    /// cannot catch this class of input, so the crate must.
+    #[test]
+    fn rejects_trailing_garbage() {
+        for input in ["cf32_le_GARBAGE", "cf32_lex", "rf32_xx", "cf32_le!!!"] {
+            assert!(
+                input.parse::<DataFormat>().is_err(),
+                "{input} must not parse: everything after the sample type must be \
+                 exactly a byte-order suffix"
+            );
         }
-    );
+    }
+
+    /// A multi-byte type must state its byte order; guessing would byte-swap.
+    #[test]
+    fn rejects_a_multi_byte_type_without_a_byte_order() {
+        for input in ["cf32", "rf64", "ci16", "ru32"] {
+            assert!(
+                input.parse::<DataFormat>().is_err(),
+                "{input} must not parse"
+            );
+        }
+    }
+
+    /// A single byte has no byte order to state.
+    ///
+    /// Accepting `ri8_le` would force `Display` to emit `ri8`, so opening a file and
+    /// writing it back would silently rewrite a required field.
+    #[test]
+    fn rejects_a_byte_order_on_a_single_byte_type() {
+        for input in ["ri8_le", "cu8_be"] {
+            assert!(
+                input.parse::<DataFormat>().is_err(),
+                "{input} must not parse"
+            );
+        }
+    }
+
+    /// The specification permits no 64-bit integers, and the empty string is not a
+    /// datatype — the value `GlobalMetadata::default()` used to supply before it was
+    /// replaced by a constructor that demands a real one.
+    #[test]
+    fn rejects_types_outside_the_spec() {
+        for input in ["ci64_le", "ru64_le", "", "c", "cf", "xf32_le", "CF32_LE"] {
+            assert!(
+                input.parse::<DataFormat>().is_err(),
+                "{input:?} must not parse"
+            );
+        }
+    }
+
+    /// A rejected datatype fails the whole file, whether or not it has captures.
+    ///
+    /// Validation used to live in `calc_capture_boundaries`, which returns early on
+    /// an empty `captures` array — so a bogus datatype was caught or ignored
+    /// depending on unrelated content. It is now the deserializer's job.
+    #[test]
+    fn a_bogus_datatype_fails_a_capture_less_file() {
+        let json_data = r#"{
+            "global": {
+                "core:datatype": "totally-not-a-datatype",
+                "core:version": "1.2.6"
+            },
+            "captures": [],
+            "annotations": []
+        }"#;
+        let err = Metadata::from_str(json_data, &[])
+            .expect_err("a file whose datatype cannot describe any bytes must not open");
+        assert!(
+            err.to_string().contains("invalid SigMF datatype"),
+            "the error must name the real problem, got: {err}"
+        );
+    }
+
+    /// The error says what was wrong, not merely that something was.
+    #[test]
+    fn errors_name_the_input_and_the_expectation() {
+        let err = "ci64_le".parse::<DataFormat>().unwrap_err().to_string();
+        assert!(err.contains("ci64_le"), "got: {err}");
+        assert!(
+            err.contains("i8"),
+            "the message should list what is permitted: {err}"
+        );
+
+        let err = "cf32".parse::<DataFormat>().unwrap_err().to_string();
+        assert!(err.contains("_le"), "got: {err}");
+    }
+
+    /// Complex samples are two components wide.
+    #[test]
+    fn size_counts_both_components_of_a_complex_sample() {
+        assert_eq!("cf32_le".parse::<DataFormat>().unwrap().size(), 8);
+        assert_eq!("rf32_le".parse::<DataFormat>().unwrap().size(), 4);
+        assert_eq!("ci16_le".parse::<DataFormat>().unwrap().size(), 4);
+        assert_eq!("ru8".parse::<DataFormat>().unwrap().size(), 1);
+    }
 }
 
 #[cfg(test)]

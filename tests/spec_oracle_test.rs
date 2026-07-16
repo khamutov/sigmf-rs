@@ -190,6 +190,44 @@ fn vendored_schema_is_the_pinned_version() {
     );
 }
 
+/// The version the crate writes into `core:version` is the version it is tested
+/// against.
+///
+/// [`vendored_schema_is_the_pinned_version`] catches a schema refresh that nobody
+/// acknowledged. This catches the other half: acknowledging it in the test suite
+/// but forgetting the crate, leaving it to stamp recordings with a spec version it
+/// no longer implements.
+#[test]
+fn the_version_the_crate_writes_is_the_version_it_is_tested_against() {
+    assert_eq!(
+        format!("v{SIGMF_VERSION}"),
+        EXPECTED_SPEC_VERSION,
+        "SIGMF_VERSION is what the crate stamps into core:version; it must track \
+         the vendored schema"
+    );
+}
+
+/// A recording built through the public constructor satisfies the specification.
+///
+/// The constructor replaced a `Default` impl that produced an empty `core:datatype`
+/// and an empty `core:version` — both required by the schema, so every recording
+/// built from it and then filled in was born invalid and stayed that way unless the
+/// caller happened to overwrite both. `GlobalMetadata::new` cannot do that: it takes
+/// a parsed datatype and supplies the version itself.
+#[test]
+fn a_recording_built_through_the_constructor_validates() {
+    let metadata = Metadata {
+        global: GlobalMetadata::new("cf32_le".parse().expect("cf32_le is a valid datatype")),
+        captures: vec![],
+        annotations: vec![],
+    };
+
+    let written: Value =
+        serde_json::from_str(&metadata.to_str().expect("serialize")).expect("output must be JSON");
+
+    assert_valid(&written, "a recording built through GlobalMetadata::new");
+}
+
 /// Our test data is honest before it is allowed to judge the crate.
 #[test]
 fn every_fixture_validates_against_the_spec_schema() {

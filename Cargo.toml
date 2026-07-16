@@ -9,11 +9,6 @@ description = "A Rust library for interacting with SigMF recordings,"
 [dependencies]
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
-# Pinned at 7.x deliberately, and on its way out: nom is used for exactly one
-# thing -- parsing the <=8-character core:datatype string -- which becomes a
-# hand-rolled FromStr with no dependency. Porting to nom 8 (a breaking API
-# change) would be rewriting code that is about to be deleted.
-nom = "7.1.3"
 
 [dev-dependencies]
 pretty_assertions = "1.4.1"

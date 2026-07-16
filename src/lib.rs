@@ -17,6 +17,13 @@ pub mod sigmf {
 
     use serde::{Deserialize, Serialize};
 
+    /// The version of the SigMF specification this crate implements, in the form
+    /// `core:version` takes.
+    ///
+    /// Kept in step with the schema vendored at `tests/spec/sigmf-schema.json`, and
+    /// asserted against it by the test suite so the two cannot drift apart.
+    pub const SIGMF_VERSION: &str = "1.2.6";
+
     #[derive(Debug)]
     pub struct SigMF {
         pub metadata: Metadata,
@@ -43,7 +50,7 @@ pub mod sigmf {
     }
 
     impl Metadata {
-        pub fn from_str(s: &str, data: &Vec<u8>) -> Result<Self, Box<dyn Error>> {
+        pub fn from_str(s: &str, data: &[u8]) -> Result<Self, Box<dyn Error>> {
             let mut metadata: Metadata = serde_json::from_str(s)?;
             metadata.calc_capture_boundaries(data)?;
             Ok(metadata)
@@ -54,30 +61,21 @@ pub mod sigmf {
             Ok(res)
         }
 
-        fn calc_capture_boundaries(&mut self, data: &Vec<u8>) -> Result<(), MetadataError> {
+        fn calc_capture_boundaries(&mut self, data: &[u8]) -> Result<(), MetadataError> {
             if self.captures.is_empty() {
                 return Ok(());
             }
 
-            let parsed = parse_data_format(self.global.datatype.as_str());
-            match parsed {
-                Err(_) => Err(MetadataError::Internal(
-                    "error parsing datatype".to_string(),
-                )),
-                Ok((_, data_format)) => {
-                    for capture in &mut self.captures {
-                        capture.data_format = data_format.clone();
-                    }
-                    Ok(())
-                }
-            }?;
+            // Every capture in a recording shares one sample format: the global
+            // `core:datatype`, already parsed at the file boundary.
+            let sample_size = self.global.datatype.size();
 
             let mut start_byte = 0;
             let last_index = self.captures.len() - 1;
             for index in 0..self.captures.len() {
                 let capture = &self.captures[index];
                 start_byte += capture.header_bytes.unwrap_or(0);
-                start_byte += capture.data_format.size() * capture.sample_start;
+                start_byte += sample_size * capture.sample_start;
                 let end_byte = if index == last_index {
                     let last_data_byte =
                         data.len() as i64 - self.global.trailing_bytes.unwrap_or(0) as i64;
@@ -91,7 +89,7 @@ pub mod sigmf {
                     last_data_byte as u64
                 } else {
                     let next_capture = &self.captures[index + 1];
-                    start_byte + next_capture.data_format.size() * next_capture.sample_start as u64
+                    start_byte + sample_size * next_capture.sample_start
                 };
 
                 if start_byte > end_byte {
@@ -109,7 +107,7 @@ pub mod sigmf {
     #[derive(Debug, Deserialize, Serialize)]
     pub struct GlobalMetadata {
         #[serde(rename = "core:datatype")]
-        pub datatype: String,
+        pub datatype: DataFormat,
 
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "core:sample_rate")]
@@ -235,24 +233,11 @@ pub mod sigmf {
         #[serde(skip)]
         #[serde(default = "default_capture_boundaries")]
         pub byte_boundaries: (u64, u64),
-
-        #[serde(skip)]
-        #[serde(default = "default_capture_data_format")]
-        pub data_format: DataFormat,
     }
 
     fn default_capture_boundaries() -> (u64, u64) {
         (0, 0)
     }
-
-    fn default_capture_data_format() -> DataFormat {
-        DataFormat {
-            number_type: NumberType::Real,
-            data_type: DataType::I8,
-        }
-    }
-
-    impl CaptureMetadata {}
 
     #[derive(Debug, PartialEq, Deserialize, Serialize)]
     pub struct AnnotationMetadata {
@@ -406,6 +391,50 @@ pub mod sigmf {
     }
 
     impl GlobalMetadata {
+        /// A global object carrying the two fields the specification requires —
+        /// `core:datatype` and `core:version` — and nothing else.
+        ///
+        /// There is deliberately no [`Default`]: the schema requires both of these,
+        /// and neither has a defensible default. A datatype cannot be guessed, and
+        /// defaulting the version to whatever the crate happens to implement is
+        /// exactly right for a recording being *written* — which is why it is set
+        /// here — but would be a fabrication anywhere else.
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// use sigmf::sigmf::GlobalMetadata;
+        ///
+        /// let global = GlobalMetadata::new("cf32_le".parse()?);
+        /// assert_eq!(global.datatype.to_string(), "cf32_le");
+        /// assert_eq!(global.version, sigmf::sigmf::SIGMF_VERSION);
+        /// # Ok::<(), sigmf::sigmf::ParseDataFormatError>(())
+        /// ```
+        pub fn new(datatype: DataFormat) -> GlobalMetadata {
+            GlobalMetadata {
+                version: SIGMF_VERSION.to_string(),
+                datatype,
+                sample_rate: None,
+                num_channels: None,
+                sha512: None,
+                offset: None,
+                description: None,
+                author: None,
+                meta_doi: None,
+                data_doi: None,
+                recorder: None,
+                license: None,
+                hw: None,
+                geolocation: None,
+                extensions: None,
+                collection: None,
+                metadata_only: None,
+                dataset: None,
+                trailing_bytes: None,
+                other: Map::new(),
+            }
+        }
+
         pub fn get_extension<T: GlobalExtension + serde::de::DeserializeOwned>(
             &self,
         ) -> Result<T, serde_json::Error> {
@@ -443,52 +472,60 @@ pub mod sigmf {
         }
     }
 
-    impl Default for GlobalMetadata {
-        fn default() -> GlobalMetadata {
-            GlobalMetadata {
-                version: "".to_string(),
-                datatype: "".to_string(),
-                sample_rate: None,
-                num_channels: None,
-                sha512: None,
-                offset: None,
-                description: None,
-                author: None,
-                meta_doi: None,
-                data_doi: None,
-                recorder: None,
-                license: None,
-                hw: None,
-                geolocation: None,
-                extensions: None,
-                collection: None,
-                metadata_only: None,
-                dataset: None,
-                trailing_bytes: None,
-                other: Map::new(),
+    /// The byte order of a multi-byte sample.
+    ///
+    /// Only the multi-byte [`DataType`] variants carry one. A single byte has no
+    /// byte order to state, and the specification's datatype grammar reflects that
+    /// by omitting the suffix for `i8` and `u8`.
+    #[derive(Debug, PartialEq, Eq, Clone, Copy)]
+    pub enum Endianess {
+        /// Most significant byte first, spelled `_be`.
+        BigEndian,
+        /// Least significant byte first, spelled `_le`.
+        LittleEndian,
+    }
+
+    impl Endianess {
+        /// The suffix this byte order is spelled with in a datatype string.
+        fn suffix(self) -> &'static str {
+            match self {
+                Endianess::BigEndian => "_be",
+                Endianess::LittleEndian => "_le",
             }
         }
     }
 
-    #[derive(Debug, PartialEq, Clone)]
-    pub enum Endianess {
-        BigEndian,
-        LittleEndian,
-    }
-
-    #[derive(Debug, PartialEq, Clone)]
+    /// The type of one component of a sample.
+    ///
+    /// These are exactly the eight the specification permits — note the absence of
+    /// 64-bit integers, which is deliberate and matches the schema.
+    ///
+    /// Byte order is part of the variant rather than a sibling field because it is
+    /// only meaningful for the multi-byte types. This is the correlation the
+    /// schema's `core:datatype` regex cannot express, and it is why [`DataFormat`]'s
+    /// parser rejects both `cf32` and `ri8_le`.
+    #[derive(Debug, PartialEq, Eq, Clone, Copy)]
     pub enum DataType {
+        /// 32-bit IEEE-754 float, spelled `f32_le` or `f32_be`.
         F32(Endianess),
+        /// 64-bit IEEE-754 float, spelled `f64_le` or `f64_be`.
         F64(Endianess),
+        /// Signed 32-bit integer, spelled `i32_le` or `i32_be`.
         I32(Endianess),
+        /// Signed 16-bit integer, spelled `i16_le` or `i16_be`.
         I16(Endianess),
+        /// Unsigned 32-bit integer, spelled `u32_le` or `u32_be`.
         U32(Endianess),
+        /// Unsigned 16-bit integer, spelled `u16_le` or `u16_be`.
         U16(Endianess),
+        /// Signed 8-bit integer, spelled `i8`.
         I8,
+        /// Unsigned 8-bit integer, spelled `u8`.
         U8,
     }
 
     impl DataType {
+        /// The width of one component in bytes.
         pub fn size(&self) -> u64 {
             match self {
                 DataType::F32(_) => 4,
@@ -503,19 +540,74 @@ pub mod sigmf {
         }
     }
 
-    #[derive(Debug, PartialEq, Clone)]
+    impl fmt::Display for DataType {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            match self {
+                DataType::F32(e) => write!(f, "f32{}", e.suffix()),
+                DataType::F64(e) => write!(f, "f64{}", e.suffix()),
+                DataType::I32(e) => write!(f, "i32{}", e.suffix()),
+                DataType::I16(e) => write!(f, "i16{}", e.suffix()),
+                DataType::U32(e) => write!(f, "u32{}", e.suffix()),
+                DataType::U16(e) => write!(f, "u16{}", e.suffix()),
+                DataType::I8 => f.write_str("i8"),
+                DataType::U8 => f.write_str("u8"),
+            }
+        }
+    }
+
+    /// Whether each sample is one component or an interleaved in-phase/quadrature
+    /// pair.
+    #[derive(Debug, PartialEq, Eq, Clone, Copy)]
     pub enum NumberType {
+        /// One component per sample, spelled `r`.
         Real,
+        /// Two interleaved components per sample, spelled `c`.
         Complex,
     }
 
-    #[derive(Debug, PartialEq, Clone)]
+    impl fmt::Display for NumberType {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str(match self {
+                NumberType::Real => "r",
+                NumberType::Complex => "c",
+            })
+        }
+    }
+
+    /// The format of the samples in a Dataset file: the value of `core:datatype`.
+    ///
+    /// This is a claim about the bytes, and the most consequential field in a
+    /// recording — reading `cf32_le` bytes as `ci16_le` yields not an error but
+    /// plausible-looking noise. It is parsed, not stored as a string, so a value
+    /// that cannot describe any real byte layout cannot exist in a [`Metadata`].
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sigmf::sigmf::{DataFormat, DataType, Endianess, NumberType};
+    ///
+    /// let format: DataFormat = "cf32_le".parse()?;
+    /// assert_eq!(format.number_type, NumberType::Complex);
+    /// assert_eq!(format.data_type, DataType::F32(Endianess::LittleEndian));
+    ///
+    /// // Complex doubles the width: two f32 components per sample.
+    /// assert_eq!(format.size(), 8);
+    ///
+    /// // Display is the exact inverse of the parse.
+    /// assert_eq!(format.to_string(), "cf32_le");
+    /// # Ok::<(), sigmf::sigmf::ParseDataFormatError>(())
+    /// ```
+    #[derive(Debug, PartialEq, Eq, Clone, Copy)]
     pub struct DataFormat {
+        /// Whether samples are real or interleaved complex pairs.
         pub number_type: NumberType,
+        /// The type of each component of a sample.
         pub data_type: DataType,
     }
 
     impl DataFormat {
+        /// The width of one whole sample in bytes, counting both components of a
+        /// complex pair.
         pub fn size(&self) -> u64 {
             self.data_type.size()
                 * match self.number_type {
@@ -525,75 +617,159 @@ pub mod sigmf {
         }
     }
 
-    enum ParserState {
-        F32,
-        F64,
-        I32,
-        I16,
-        U32,
-        U16,
+    impl fmt::Display for DataFormat {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "{}{}", self.number_type, self.data_type)
+        }
     }
 
-    impl ParserState {
-        fn to_data_type(&self, endianess: Endianess) -> DataType {
-            match self {
-                ParserState::F32 => DataType::F32(endianess),
-                ParserState::F64 => DataType::F64(endianess),
-                ParserState::I32 => DataType::I32(endianess),
-                ParserState::I16 => DataType::I16(endianess),
-                ParserState::U32 => DataType::U32(endianess),
-                ParserState::U16 => DataType::U16(endianess),
+    /// The reason a string is not a valid `core:datatype`.
+    ///
+    /// Deliberately opaque, mirroring [`std::num::ParseIntError`]: the useful
+    /// content is the [`Display`](fmt::Display) message, which names both the
+    /// offending input and what was expected in its place.
+    #[derive(Debug, PartialEq, Eq, Clone)]
+    pub struct ParseDataFormatError {
+        input: Box<str>,
+        kind: ParseDataFormatErrorKind,
+    }
+
+    #[derive(Debug, PartialEq, Eq, Clone, Copy)]
+    enum ParseDataFormatErrorKind {
+        NumberType,
+        SampleType,
+        MissingEndianess,
+        Endianess,
+        RedundantEndianess,
+    }
+
+    impl fmt::Display for ParseDataFormatError {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            write!(f, "invalid SigMF datatype `{}`: ", self.input)?;
+            match self.kind {
+                ParseDataFormatErrorKind::NumberType => {
+                    f.write_str("must begin with `r` (real) or `c` (complex)")
+                }
+                ParseDataFormatErrorKind::SampleType => f.write_str(
+                    "unknown sample type; the specification permits \
+                     f32, f64, i32, i16, u32, u16, i8, u8",
+                ),
+                ParseDataFormatErrorKind::MissingEndianess => f.write_str(
+                    "a multi-byte sample type must state its byte order \
+                     with an `_le` or `_be` suffix",
+                ),
+                ParseDataFormatErrorKind::Endianess => {
+                    f.write_str("expected a byte order suffix of `_le` or `_be`")
+                }
+                ParseDataFormatErrorKind::RedundantEndianess => f.write_str(
+                    "a single-byte sample type has no byte order and must not \
+                     carry an `_le` or `_be` suffix",
+                ),
             }
         }
     }
 
-    fn parse_real(input: &str) -> nom::IResult<&str, NumberType> {
-        nom::combinator::map(nom::bytes::complete::tag("r"), |_| NumberType::Real)(input)
+    impl Error for ParseDataFormatError {}
+
+    impl std::str::FromStr for DataFormat {
+        type Err = ParseDataFormatError;
+
+        /// Parse a `core:datatype` string such as `cf32_le`.
+        ///
+        /// Total over its input and stricter than the schema's regex in three ways,
+        /// each of which the regex permits only because it cannot say otherwise:
+        ///
+        /// - **Trailing garbage is rejected.** The schema's pattern carries no `$`
+        ///   anchor, so `cf32_le_GARBAGE` satisfies it by matching the `cf32_le`
+        ///   prefix and ignoring the rest.
+        /// - **A bare `cf32` is rejected.** The suffix is optional in the pattern
+        ///   for the sake of `i8`/`u8`; a regex cannot make it conditional on the
+        ///   width. Guessing the byte order of an `f32` would silently produce
+        ///   byte-swapped garbage, which is the failure this type exists to prevent.
+        /// - **`ri8_le` is rejected.** Accepting it would mean [`Display`](fmt::Display)
+        ///   emitting `ri8` for a value parsed from `ri8_le`, so reading and
+        ///   rewriting a file would quietly alter a required field.
+        fn from_str(s: &str) -> Result<Self, Self::Err> {
+            let fail = |kind| ParseDataFormatError {
+                input: s.into(),
+                kind,
+            };
+
+            let (number_type, rest) = match s.as_bytes().first() {
+                Some(b'r') => (NumberType::Real, &s[1..]),
+                Some(b'c') => (NumberType::Complex, &s[1..]),
+                _ => return Err(fail(ParseDataFormatErrorKind::NumberType)),
+            };
+
+            // Splitting on the first `_` is what makes the parse total: everything
+            // after it must be exactly an endianess suffix, so trailing garbage has
+            // nowhere to hide.
+            let (base, suffix) = match rest.split_once('_') {
+                Some((base, suffix)) => (base, Some(suffix)),
+                None => (rest, None),
+            };
+
+            let data_type = match base {
+                "i8" | "u8" => {
+                    if suffix.is_some() {
+                        return Err(fail(ParseDataFormatErrorKind::RedundantEndianess));
+                    }
+                    if base == "i8" {
+                        DataType::I8
+                    } else {
+                        DataType::U8
+                    }
+                }
+                "f32" | "f64" | "i32" | "i16" | "u32" | "u16" => {
+                    let endianess = match suffix {
+                        Some("le") => Endianess::LittleEndian,
+                        Some("be") => Endianess::BigEndian,
+                        Some(_) => return Err(fail(ParseDataFormatErrorKind::Endianess)),
+                        None => return Err(fail(ParseDataFormatErrorKind::MissingEndianess)),
+                    };
+                    match base {
+                        "f32" => DataType::F32(endianess),
+                        "f64" => DataType::F64(endianess),
+                        "i32" => DataType::I32(endianess),
+                        "i16" => DataType::I16(endianess),
+                        "u32" => DataType::U32(endianess),
+                        _ => DataType::U16(endianess),
+                    }
+                }
+                _ => return Err(fail(ParseDataFormatErrorKind::SampleType)),
+            };
+
+            Ok(DataFormat {
+                number_type,
+                data_type,
+            })
+        }
     }
 
-    fn parse_complex(input: &str) -> nom::IResult<&str, NumberType> {
-        nom::combinator::map(nom::bytes::complete::tag("c"), |_| NumberType::Complex)(input)
+    impl Serialize for DataFormat {
+        fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+            serializer.collect_str(self)
+        }
     }
 
-    fn parse_type(input: &str) -> nom::IResult<&str, DataType> {
-        let (input, data_type) = nom::branch::alt((
-            nom::combinator::map(nom::bytes::complete::tag("f32"), |_| ParserState::F32),
-            nom::combinator::map(nom::bytes::complete::tag("f64"), |_| ParserState::F64),
-            nom::combinator::map(nom::bytes::complete::tag("i32"), |_| ParserState::I32),
-            nom::combinator::map(nom::bytes::complete::tag("i16"), |_| ParserState::I16),
-            nom::combinator::map(nom::bytes::complete::tag("u32"), |_| ParserState::U32),
-            nom::combinator::map(nom::bytes::complete::tag("u16"), |_| ParserState::U16),
-        ))(input)?;
-        let (input, endianess) = nom::branch::alt((
-            nom::combinator::map(nom::bytes::complete::tag("_le"), |_| {
-                Endianess::LittleEndian
-            }),
-            nom::combinator::map(nom::bytes::complete::tag("_be"), |_| Endianess::BigEndian),
-        ))(input)?;
-        Ok((input, data_type.to_data_type(endianess)))
-    }
+    impl<'de> Deserialize<'de> for DataFormat {
+        fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+            struct DataFormatVisitor;
 
-    fn parse_byte(input: &str) -> nom::IResult<&str, DataType> {
-        nom::branch::alt((
-            nom::combinator::map(nom::bytes::complete::tag("i8"), |_| DataType::I8),
-            nom::combinator::map(nom::bytes::complete::tag("u8"), |_| DataType::U8),
-        ))(input)
-    }
+            impl serde::de::Visitor<'_> for DataFormatVisitor {
+                type Value = DataFormat;
 
-    fn parse_data_type(input: &str) -> nom::IResult<&str, DataType> {
-        nom::branch::alt((parse_type, parse_byte))(input)
-    }
+                fn expecting(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+                    f.write_str("a SigMF datatype string such as `cf32_le`")
+                }
 
-    pub fn parse_data_format(input: &str) -> nom::IResult<&str, DataFormat> {
-        let (input, number_type) = nom::branch::alt((parse_real, parse_complex))(input)?;
-        let (input, data_type) = parse_data_type(input)?;
-        Ok((
-            input,
-            DataFormat {
-                number_type: number_type,
-                data_type: data_type,
-            },
-        ))
+                fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<Self::Value, E> {
+                    v.parse().map_err(E::custom)
+                }
+            }
+
+            deserializer.deserialize_str(DataFormatVisitor)
+        }
     }
 }
 

@@ -10,7 +10,7 @@ fn test_open_file() -> Result<(), Box<dyn Error>> {
         signal?.metadata.global,
         GlobalMetadata {
             version: "1.0.0".to_string(),
-            datatype: "rf32_le".to_string(),
+            datatype: "rf32_le".parse()?,
             sample_rate: None,
             num_channels: Some(1),
             sha512: Some("f4984219b318894fa7144519185d1ae81ea721c6113243a52b51e444512a39d74cf41a4cec3c5d000bd7277cc71232c04d7a946717497e18619bdbe94bfeadd6".to_string()),

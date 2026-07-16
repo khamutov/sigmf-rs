@@ -32,11 +32,23 @@ this schema.
 Refreshing it to a new spec version is a deliberate act, not a drive-by. See
 `tests/spec/README.md`.
 
-Two limits worth knowing. The schema constrains **structure**, not **semantics** —
-it will happily accept a field whose meaning you have inverted. And its prose
+Three limits worth knowing. The schema constrains **structure**, not **semantics** —
+it will happily accept a field whose meaning you have inverted. Its prose
 descriptions are not authoritative against each other: `core:extensions.optional`
-is described one way by its parent and the opposite way by its own line. The
-oracle raises the floor; it does not remove the need to read.
+is described one way by its parent and the opposite way by its own line. And its
+regexes are looser than the format they describe — most importantly the one on
+`core:datatype`, which is anchored with `^` but never closed with `$`, so the
+validator accepts `cf32_le_GARBAGE` by matching a prefix and ignoring the rest.
+
+That last one has a consequence worth stating before you trip over it: **on
+`core:datatype` this crate is deliberately stricter than the schema.** It rejects
+trailing garbage, a bare `cf32`, and `ri8_le` — all three of which the validator
+accepts. If you are tempted to loosen the parser so it agrees with the schema, read
+the `FromStr` impl's documentation first; each rejection has a reason, and one of
+them is that `Display` must stay an exact inverse of the parse so that opening a
+file and writing it back cannot silently alter a required field.
+
+The oracle raises the floor; it does not remove the need to read.
 
 ## Known-red tests
 
