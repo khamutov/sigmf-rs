@@ -1,14 +1,27 @@
+/// The complex-number type this crate's sample vocabulary is built on.
+///
+/// Re-exported because it is a *public* dependency: `Sample` is implemented for
+/// `num_complex::Complex<f32>` and not for some structurally identical type from
+/// another copy of the crate, so a caller whose `num-complex` resolves to a
+/// different major than ours would find `to_file` mysteriously unwilling to take
+/// their samples. Reaching for `sigmf::num_complex` instead of a direct dependency
+/// makes that impossible to get wrong.
+pub use num_complex;
+
 const SIGMF_ARCHIVE_EXT: &'static str = ".sigmf";
 const SIGMF_METADATA_EXT: &'static str = ".sigmf-meta";
 const SIGMF_DATASET_EXT: &'static str = ".sigmf-data";
 const SIGMF_COLLECTION_EXT: &'static str = ".sigmf-collection";
 
 pub mod sigmf {
+    use crate::{SIGMF_DATASET_EXT, SIGMF_METADATA_EXT};
     use core::fmt::Debug;
+    use num_complex::Complex;
     use serde_json::de::Read;
     use serde_json::Value;
+    use sha2::{Digest, Sha512};
     use std::collections::BTreeMap as Map;
-    use std::fmt;
+    use std::fmt::{self, Write as _};
     use std::{
         error::Error,
         fs,
@@ -39,6 +52,163 @@ pub mod sigmf {
                 metadata: metadata,
                 datafile: None,
             })
+        }
+
+        /// A Recording that describes samples not yet written.
+        ///
+        /// `metadata.global.datatype` is not read by [`to_file`](Self::to_file) —
+        /// it is overwritten by it — so whatever [`GlobalMetadata::new`] was handed
+        /// is a placeholder until the samples arrive and settle the question.
+        pub fn new(metadata: Metadata) -> Self {
+            Self {
+                metadata,
+                datafile: None,
+            }
+        }
+
+        /// Write both files of the Recording, little-endian, with a checksum.
+        ///
+        /// See [`to_file_with`](Self::to_file_with), which this defers to, for what
+        /// gets written and what gets overwritten.
+        pub fn to_file<S: Sample, P: AsRef<Path>>(
+            &mut self,
+            basename: P,
+            samples: &[S],
+        ) -> Result<(), Box<dyn Error>> {
+            self.to_file_with(basename, samples, WriteOptions::default())
+        }
+
+        /// Write both files of the Recording: `basename.sigmf-data` from `samples`,
+        /// and `basename.sigmf-meta` describing them.
+        ///
+        /// # `core:datatype` is set, not read
+        ///
+        /// The datatype is derived from `S` and **overwrites** whatever
+        /// `self.metadata.global.datatype` held. This is the crate's central
+        /// guarantee and the reason the write path is generic: the field and the
+        /// bytes cannot disagree, because only one of them is an input. A caller
+        /// who builds a Global saying `ri16_le` and then writes `Complex<f32>`
+        /// samples gets a `cf32_le` file — their claim was wrong, and the file
+        /// tells the truth about its own contents.
+        ///
+        /// `core:sha512` is set the same way and for the same reason: computed from
+        /// the bytes being written, or, if [`WriteOptions::checksum`] is off,
+        /// *cleared* rather than left to describe a Dataset that no longer exists.
+        ///
+        /// # Ordering
+        ///
+        /// The Dataset is written first and the Metadata last, so that a process
+        /// that dies mid-write leaves either a complete Recording or a `.sigmf-data`
+        /// with no sidecar — visibly unfinished. The reverse order can leave a
+        /// sidecar that looks valid while describing a truncated Dataset, which is
+        /// worse than an obvious failure. With `core:sha512` written, the
+        /// distinction is not merely visible but provable.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`MetadataError::MultiChannelDataset`] if `core:num_channels` is
+        /// set to anything but 1 (see the SigMF specification's advice to use
+        /// Collections instead), or an I/O error if either file cannot be written.
+        pub fn to_file_with<S: Sample, P: AsRef<Path>>(
+            &mut self,
+            basename: P,
+            samples: &[S],
+            options: WriteOptions,
+        ) -> Result<(), Box<dyn Error>> {
+            // A `&[S]` is one channel by construction: nothing in the slice can say
+            // where one channel ends and the next begins, so honouring
+            // `core:num_channels > 1` would mean writing a datatype that describes
+            // something other than the bytes.
+            if let Some(channels) = self.metadata.global.num_channels {
+                if channels != 1 {
+                    return Err(Box::new(MetadataError::MultiChannelDataset(channels)));
+                }
+            }
+
+            let datatype = DataFormat::of::<S>(options.endianness);
+            let mut data = Vec::with_capacity(samples.len() * datatype.size() as usize);
+            for sample in samples {
+                sample.encode(options.endianness, &mut data);
+            }
+
+            self.metadata.global.datatype = datatype;
+            self.metadata.global.sha512 =
+                options.checksum.then(|| hex_encode(&Sha512::digest(&data)));
+
+            let data_path = append_extension(basename.as_ref(), SIGMF_DATASET_EXT);
+            let metadata_path = append_extension(basename.as_ref(), SIGMF_METADATA_EXT);
+
+            fs::write(&data_path, &data)?;
+            fs::write(&metadata_path, self.metadata.to_str()?)?;
+
+            self.datafile = Some(data_path);
+            Ok(())
+        }
+    }
+
+    /// A Recording's two files share a basename with an extension **appended**.
+    ///
+    /// Appended, not substituted: `Path::set_extension` would turn the perfectly
+    /// good basename `dsc_2026-07-16T09.14` into `dsc_2026-07-16T09.sigmf-data`,
+    /// silently, by treating the last dotted segment as an extension to replace.
+    fn append_extension(basename: &Path, extension: &str) -> PathBuf {
+        let mut name = basename.as_os_str().to_owned();
+        name.push(extension);
+        PathBuf::from(name)
+    }
+
+    fn hex_encode(bytes: &[u8]) -> String {
+        let mut hex = String::with_capacity(bytes.len() * 2);
+        for byte in bytes {
+            // Writing to a String is infallible.
+            let _ = write!(hex, "{byte:02x}");
+        }
+        hex
+    }
+
+    /// The knobs [`SigMF::to_file_with`] turns, with sane values from [`Default`].
+    ///
+    /// Both defaults are safe to take blind, and it is worth saying why, because
+    /// defaulting a field of `core:datatype` would be alarming in any other design:
+    /// whatever byte order this picks is the byte order the emitted datatype
+    /// *states*. The choice cannot make a Recording lie about itself; at worst it
+    /// makes one inconvenient to a reader that wanted the other order.
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct WriteOptions {
+        endianness: Endianess,
+        checksum: bool,
+    }
+
+    impl Default for WriteOptions {
+        /// Little-endian, checksummed.
+        ///
+        /// Little-endian because it is what essentially every IQ recorder emits and
+        /// what the schema's own `core:datatype` examples use. Checksummed because
+        /// a Recording that cannot prove its Dataset is intact is one you can only
+        /// hope about — and the hash costs one pass over a buffer already in hand.
+        fn default() -> Self {
+            Self {
+                endianness: Endianess::LittleEndian,
+                checksum: true,
+            }
+        }
+    }
+
+    impl WriteOptions {
+        /// Write samples in this byte order, and say so in `core:datatype`.
+        pub fn endianness(mut self, endianness: Endianess) -> Self {
+            self.endianness = endianness;
+            self
+        }
+
+        /// Whether to compute `core:sha512` over the Dataset.
+        ///
+        /// Turning this off omits the field rather than preserving any hash the
+        /// Global already carried, which would otherwise describe a Dataset that
+        /// has just been replaced.
+        pub fn checksum(mut self, checksum: bool) -> Self {
+            self.checksum = checksum;
+            self
         }
     }
 
@@ -608,6 +778,10 @@ pub mod sigmf {
     pub enum MetadataError {
         Internal(String),
         Serde(serde_json::Error),
+
+        /// A Recording declaring `core:num_channels` other than 1 was handed to the
+        /// typed write path, which has no way to express it.
+        MultiChannelDataset(u64),
     }
 
     impl fmt::Display for MetadataError {
@@ -617,6 +791,14 @@ pub mod sigmf {
                     write!(f, "Internal error: {}", err_msg)
                 }
                 MetadataError::Serde(e) => <&serde_json::Error as std::fmt::Display>::fmt(&e, f),
+                MetadataError::MultiChannelDataset(channels) => write!(
+                    f,
+                    "cannot write a Dataset with `core:num_channels` = {channels}: a typed \
+                     sample buffer is one channel, and interleaving several into it would \
+                     leave `core:datatype` describing something other than the bytes. The \
+                     specification recommends SigMF Collections over `core:num_channels` \
+                     for multi-channel IQ, for widest application support",
+                ),
             }
         }
     }
@@ -917,6 +1099,31 @@ pub mod sigmf {
                     NumberType::Complex => 2,
                 }
         }
+
+        /// The `core:datatype` a Dataset of `S` samples written in `endianness`
+        /// carries.
+        ///
+        /// This is the derivation [`SigMF::to_file`] performs, exposed because a
+        /// caller may reasonably want to know what it is about to write. Note what
+        /// is missing from the signature: there is no sample buffer, because the
+        /// answer is a function of the *type*, and no fallible path, because there
+        /// is no input here that could be wrong.
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// use sigmf::num_complex::Complex;
+        /// use sigmf::sigmf::{DataFormat, Endianess::{BigEndian, LittleEndian}};
+        ///
+        /// assert_eq!(DataFormat::of::<Complex<f32>>(LittleEndian).to_string(), "cf32_le");
+        /// assert_eq!(DataFormat::of::<i16>(BigEndian).to_string(), "ri16_be");
+        ///
+        /// // One byte has no byte order, and the datatype does not pretend it does.
+        /// assert_eq!(DataFormat::of::<u8>(BigEndian).to_string(), "ru8");
+        /// ```
+        pub fn of<S: Sample>(endianness: Endianess) -> DataFormat {
+            S::data_format(endianness)
+        }
     }
 
     impl fmt::Display for DataFormat {
@@ -924,6 +1131,105 @@ pub mod sigmf {
             write!(f, "{}{}", self.number_type, self.data_type)
         }
     }
+
+    /// A Rust type that can be the sample type of a SigMF Dataset.
+    ///
+    /// Implemented for the eight component types the specification permits — `f32`,
+    /// `f64`, `i32`, `i16`, `u32`, `u16`, `i8`, `u8` — each on its own, which is a
+    /// real (`r`) datatype, and each wrapped in [`Complex`], which is a complex
+    /// (`c`) one. Those sixteen are the whole of SigMF's sample vocabulary.
+    ///
+    /// # Why this is sealed
+    ///
+    /// The trait cannot be implemented outside this crate, and that is not
+    /// housekeeping. `core:datatype` is a claim about the bytes of the Dataset, and
+    /// it is the claim every reader trusts in order to interpret them — read
+    /// `cf32_le` bytes as `ci16_le` and there is no error, only plausible noise.
+    /// Sealing is what earns [`SigMF::to_file`] the right to *derive* that claim
+    /// from `S` instead of trusting a caller to state it: a downstream
+    /// `impl Sample for MyType` announcing `f32` while occupying eight bytes would
+    /// turn the derivation into a lie told by a signature that looks like it
+    /// checked. The specification's list of eight is closed, so there is nothing
+    /// legitimate to add here anyway.
+    pub trait Sample: Copy + private::Sealed {}
+
+    mod private {
+        use super::{DataFormat, Endianess};
+
+        /// What [`Sample`](super::Sample) actually provides.
+        ///
+        /// Unnameable downstream, which makes `Sample` both unimplementable and
+        /// free to change: everything here is an implementation detail of the write
+        /// path, and the public surface a caller needs is
+        /// [`DataFormat::of`](super::DataFormat::of).
+        pub trait Sealed {
+            /// The `core:datatype` a Dataset of these samples carries.
+            fn data_format(endianness: Endianess) -> DataFormat;
+
+            /// Append this sample's bytes, in `endianness`, to `out`.
+            ///
+            /// Infallible, and writing to a buffer rather than a sink, because the
+            /// whole Dataset is assembled in memory before any of it is written —
+            /// the samples are already in memory when they arrive, and the checksum
+            /// needs a second look at them.
+            fn encode(self, endianness: Endianess, out: &mut Vec<u8>);
+        }
+    }
+
+    /// Implements [`Sample`] for a component type and for its complex pair.
+    ///
+    /// `$data_type` maps a byte order to the [`DataType`] the component is spelled
+    /// with. For the multi-byte types that is the variant's own constructor. The
+    /// two 8-bit types pass a closure that discards the byte order, because one
+    /// byte has none: the specification's datatype grammar has no `i8_le`, and
+    /// [`DataFormat`]'s parser rejects it.
+    macro_rules! impl_sample {
+        ($component:ty, $data_type:expr) => {
+            impl private::Sealed for $component {
+                fn data_format(endianness: Endianess) -> DataFormat {
+                    DataFormat {
+                        number_type: NumberType::Real,
+                        data_type: $data_type(endianness),
+                    }
+                }
+
+                fn encode(self, endianness: Endianess, out: &mut Vec<u8>) {
+                    match endianness {
+                        Endianess::LittleEndian => out.extend_from_slice(&self.to_le_bytes()),
+                        Endianess::BigEndian => out.extend_from_slice(&self.to_be_bytes()),
+                    }
+                }
+            }
+
+            impl Sample for $component {}
+
+            impl private::Sealed for Complex<$component> {
+                fn data_format(endianness: Endianess) -> DataFormat {
+                    DataFormat {
+                        number_type: NumberType::Complex,
+                        data_type: $data_type(endianness),
+                    }
+                }
+
+                fn encode(self, endianness: Endianess, out: &mut Vec<u8>) {
+                    // In-phase then quadrature: the interleaving `c` denotes.
+                    self.re.encode(endianness, out);
+                    self.im.encode(endianness, out);
+                }
+            }
+
+            impl Sample for Complex<$component> {}
+        };
+    }
+
+    impl_sample!(f32, DataType::F32);
+    impl_sample!(f64, DataType::F64);
+    impl_sample!(i32, DataType::I32);
+    impl_sample!(i16, DataType::I16);
+    impl_sample!(u32, DataType::U32);
+    impl_sample!(u16, DataType::U16);
+    impl_sample!(i8, |_| DataType::I8);
+    impl_sample!(u8, |_| DataType::U8);
 
     /// The reason a string is not a valid `core:datatype`.
     ///

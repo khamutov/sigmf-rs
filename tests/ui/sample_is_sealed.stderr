@@ -1,0 +1,37 @@
+error[E0277]: the trait bound `EightByteThing: sigmf::private::Sealed` is not satisfied
+  --> tests/ui/sample_is_sealed.rs:15:17
+   |
+15 | impl Sample for EightByteThing {}
+   |                 ^^^^^^^^^^^^^^ unsatisfied trait bound
+   |
+help: the trait `sigmf::private::Sealed` is not implemented for `EightByteThing`
+  --> tests/ui/sample_is_sealed.rs:11:1
+   |
+11 | struct EightByteThing {
+   | ^^^^^^^^^^^^^^^^^^^^^
+   = help: the following other types implement trait `sigmf::private::Sealed`:
+             f32
+             f64
+             i16
+             i32
+             i8
+             sigmf::num_complex::Complex<f32>
+             sigmf::num_complex::Complex<f64>
+             sigmf::num_complex::Complex<i16>
+           and $N others
+note: required by a bound in `Sample`
+  --> src/lib.rs
+   |
+   |     pub trait Sample: Copy + private::Sealed {}
+   |                              ^^^^^^^^^^^^^^^ required by this bound in `Sample`
+   = note: `Sample` is a "sealed trait", because to implement it you also need to implement `sigmf::sigmf::private::Sealed`, which is not accessible; this is usually done to force you to use one of the provided types that already implement it
+   = help: the following types implement the trait:
+             f32
+             sigmf::num_complex::Complex<f32>
+             sigmf::num_complex::Complex<f64>
+             sigmf::num_complex::Complex<i32>
+             sigmf::num_complex::Complex<i16>
+             sigmf::num_complex::Complex<u32>
+             sigmf::num_complex::Complex<u16>
+             sigmf::num_complex::Complex<i8>
+           and $N others

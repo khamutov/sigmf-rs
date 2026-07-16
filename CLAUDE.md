@@ -89,6 +89,30 @@ apart by asking what the assertion is measured against. Against the specificatio
 never edit it. Against a remembered output: it is only as right as the code was on
 the day it was written.
 
+## A test born green has never been seen to fail
+
+The known-red rule works because an `#[ignore]`d test is watched failing before it
+is watched passing. Most tests never get that. They are written against code that
+already works, so their first run is green — and green is equally consistent with
+"the property holds" and "the assertion cannot see the property at all". Twice now
+it has been the second:
+
+- The round-trip fidelity helper compared key *paths* and never once compared a
+  value. It passed a longitude/latitude transposition — the exact bug
+  `Geolocation`'s named components exist to prevent — while reporting that the
+  recording had survived intact.
+- Every write-path test used a basename with no dot in it, which is precisely the
+  case where appending `.sigmf-data` and substituting it with
+  `Path::set_extension` agree. The comment explaining why appending matters sat
+  directly above code that no test could tell apart from the alternative it warned
+  against.
+
+Both were found the same way, and it is the only way that finds them: **break the
+thing the test names, and watch it fail.** If it stays green, or goes red somewhere
+else, you have just learned what the test actually tests — and it was not what the
+name claimed. Do this whenever a test is born green. It costs two minutes and a
+restored file.
+
 # Code conventions
 
 ## Comments & docs

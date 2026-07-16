@@ -24,12 +24,16 @@
 //!     cargo test --test spec_oracle_test -- --ignored
 
 use std::collections::BTreeSet;
+use std::fmt::Write as _;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::sync::OnceLock;
 
 use serde_json::{json, Value};
+use sha2::{Digest, Sha512};
+use sigmf::num_complex::Complex;
 use sigmf::sigmf::*;
+use tempfile::TempDir;
 
 /// The SigMF version vendored at `tests/spec/sigmf-schema.json`, as it appears in
 /// the schema's own `$id`.
@@ -594,4 +598,428 @@ fn set_extension_declares_the_extension_it_writes() {
     );
 
     assert_valid(&written, "metadata produced by set_extension");
+}
+
+/// The oracle, pointed at our own output.
+///
+/// Everything above judges fixtures — files someone else wrote — or metadata this
+/// crate read and handed straight back. These tests judge recordings the crate
+/// *originates*: samples in, two files out, and the specification's own schema
+/// asked whether what landed is a SigMF recording.
+///
+/// One claim runs through all of them, and it is the claim the typed write path
+/// exists to make: `core:datatype` and `core:sha512` describe the Dataset that was
+/// actually written, and cannot be talked into describing anything else.
+mod write_path {
+    use super::*;
+
+    /// A Recording of a coast-station DSC watch on 16 MHz at 32 kSa/s — the case
+    /// this crate was written to serve, and the one `realistic_recording.sigmf-meta`
+    /// describes.
+    ///
+    /// `datatype` is the caller's *claim*, and it is a parameter because several
+    /// tests below hand in a claim that is false and assert the written file
+    /// contradicts it.
+    fn a_dsc_watch_recording(datatype: &str) -> SigMF {
+        let mut global = GlobalMetadata::new(datatype.parse().expect("a valid datatype"));
+        global.sample_rate = Some(32_000.0);
+        global.recorder = Some("winradio-agent".to_string());
+
+        SigMF::new(Metadata {
+            global,
+            captures: vec![serde_json::from_value(json!({
+                "core:sample_start": 0,
+                "core:frequency": 16_804_500.0,
+                "core:datetime": "2026-07-16T09:14:22.000Z",
+            }))
+            .expect("the capture literal must deserialize")],
+            annotations: vec![],
+        })
+    }
+
+    /// Samples with no two components alike, so that a test can tell in-phase from
+    /// quadrature, and one byte order from the other.
+    fn dsc_samples() -> Vec<Complex<f32>> {
+        vec![
+            Complex::new(1.0, -2.0),
+            Complex::new(0.5, 0.25),
+            Complex::new(-1.5, 3.0),
+        ]
+    }
+
+    /// Where `to_file` puts a file, worked out independently of the crate's own
+    /// helper so that a mistake in that helper cannot hide behind this one.
+    fn sibling(basename: &Path, extension: &str) -> PathBuf {
+        PathBuf::from(format!("{}{extension}", basename.display()))
+    }
+
+    fn hex(bytes: &[u8]) -> String {
+        bytes.iter().fold(String::new(), |mut out, byte| {
+            let _ = write!(out, "{byte:02x}");
+            out
+        })
+    }
+
+    /// The datatype in the file describes the bytes in the file, whatever the
+    /// caller believed when they built the metadata.
+    ///
+    /// This is what the whole typed write path is for. The Global handed over here
+    /// says `ri16_le` — real 16-bit integers, two bytes a sample — and the samples
+    /// are complex 32-bit floats, eight bytes a sample. Both cannot be true of the
+    /// bytes on disk, and it is not the caller's claim that survives.
+    #[test]
+    fn the_datatype_written_describes_the_samples_not_the_callers_claim() {
+        let dir = TempDir::new().expect("a temp dir");
+        let basename = dir.path().join("dsc_watch");
+
+        let mut recording = a_dsc_watch_recording("ri16_le");
+        recording
+            .to_file(&basename, &dsc_samples())
+            .expect("writing must succeed");
+
+        let written = read_json(&sibling(&basename, ".sigmf-meta"));
+        assert_eq!(
+            written["global"]["core:datatype"],
+            json!("cf32_le"),
+            "the file must describe the samples it holds, not the claim it was handed"
+        );
+        assert_eq!(
+            recording.metadata.global.datatype.to_string(),
+            "cf32_le",
+            "and the metadata still in hand must agree with the file, rather than \
+             keeping a claim the caller could go on to write somewhere else"
+        );
+    }
+
+    /// The specification's own schema, asked about a recording this crate made.
+    #[test]
+    fn a_written_recording_validates_against_the_spec_schema() {
+        let dir = TempDir::new().expect("a temp dir");
+        let basename = dir.path().join("dsc_watch");
+
+        let mut recording = a_dsc_watch_recording("cf32_le");
+        recording
+            .to_file(&basename, &dsc_samples())
+            .expect("writing must succeed");
+
+        assert_valid(
+            &read_json(&sibling(&basename, ".sigmf-meta")),
+            "a recording written by this crate",
+        );
+    }
+
+    /// Samples in, samples out: what was written is what was handed over.
+    #[test]
+    fn a_written_recording_reads_back_with_its_metadata_and_samples_intact() {
+        let dir = TempDir::new().expect("a temp dir");
+        let basename = dir.path().join("dsc_watch");
+
+        let samples = dsc_samples();
+        let mut recording = a_dsc_watch_recording("cf32_le");
+        recording
+            .to_file(&basename, &samples)
+            .expect("writing must succeed");
+
+        let reopened =
+            SigMF::from_file(sibling(&basename, ".sigmf-meta")).expect("the recording must reopen");
+        let global = &reopened.metadata.global;
+        assert_eq!(global.datatype.to_string(), "cf32_le");
+        assert_eq!(global.sample_rate, Some(32_000.0));
+        assert_eq!(global.recorder.as_deref(), Some("winradio-agent"));
+        assert_eq!(global.version, SIGMF_VERSION);
+        assert_eq!(
+            reopened.metadata.captures[0].frequency,
+            Some(16_804_500.0),
+            "the capture's centre frequency must survive"
+        );
+
+        // Interleaved, in-phase first, little-endian — recomputed here rather than
+        // borrowed from the crate that is on trial.
+        let expected: Vec<u8> = samples
+            .iter()
+            .flat_map(|s| [s.re.to_le_bytes(), s.im.to_le_bytes()])
+            .flatten()
+            .collect();
+        assert_eq!(
+            fs::read(sibling(&basename, ".sigmf-data")).expect("a dataset"),
+            expected,
+            "the dataset must be the samples, interleaved and little-endian"
+        );
+    }
+
+    /// Big-endian samples are written big-endian, and the datatype says so.
+    #[test]
+    fn a_big_endian_recording_says_it_is_big_endian_and_is() {
+        let dir = TempDir::new().expect("a temp dir");
+        let basename = dir.path().join("dsc_watch");
+
+        let samples = dsc_samples();
+        let mut recording = a_dsc_watch_recording("cf32_le");
+        recording
+            .to_file_with(
+                &basename,
+                &samples,
+                WriteOptions::default().endianness(Endianess::BigEndian),
+            )
+            .expect("writing must succeed");
+
+        let written = read_json(&sibling(&basename, ".sigmf-meta"));
+        assert_eq!(written["global"]["core:datatype"], json!("cf32_be"));
+
+        let expected: Vec<u8> = samples
+            .iter()
+            .flat_map(|s| [s.re.to_be_bytes(), s.im.to_be_bytes()])
+            .flatten()
+            .collect();
+        assert_eq!(
+            fs::read(sibling(&basename, ".sigmf-data")).expect("a dataset"),
+            expected
+        );
+    }
+
+    /// `core:sha512` hashes the Dataset that is on disk, not the buffer we meant to
+    /// put there.
+    ///
+    /// The length assertion is not redundant with [`assert_valid`]: the schema's
+    /// pattern for this field is `^[0-9a-fA-F]{128}` — anchored at the start and
+    /// never closed — so the oracle accepts 128 hex digits with anything at all
+    /// appended. It cannot catch a hash that is too long, and this can.
+    #[test]
+    fn the_written_sha512_is_the_hash_of_the_dataset_on_disk() {
+        let dir = TempDir::new().expect("a temp dir");
+        let basename = dir.path().join("dsc_watch");
+
+        let mut recording = a_dsc_watch_recording("cf32_le");
+        recording
+            .to_file(&basename, &dsc_samples())
+            .expect("writing must succeed");
+
+        let on_disk = fs::read(sibling(&basename, ".sigmf-data")).expect("a dataset");
+        let written = read_json(&sibling(&basename, ".sigmf-meta"));
+        let hash = written["global"]["core:sha512"]
+            .as_str()
+            .expect("a recording must be written with a checksum by default");
+
+        assert_eq!(hash, hex(&Sha512::digest(&on_disk)));
+        assert_eq!(hash.len(), 128, "a SHA-512 is 128 hex digits: {hash}");
+    }
+
+    /// Turning the checksum off omits the field rather than leaving a hash of
+    /// something else behind.
+    ///
+    /// The Global here arrives carrying a hash — as one read from an existing file
+    /// would — and is then written with different samples. Preserving that hash
+    /// would produce a recording that fails its own integrity check, which is the
+    /// same class of lie as a datatype that does not match its bytes.
+    #[test]
+    fn writing_without_a_checksum_clears_a_stale_hash_rather_than_keeping_it() {
+        let dir = TempDir::new().expect("a temp dir");
+        let basename = dir.path().join("dsc_watch");
+
+        let mut recording = a_dsc_watch_recording("cf32_le");
+        recording.metadata.global.sha512 = Some("0".repeat(128));
+        recording
+            .to_file_with(
+                &basename,
+                &dsc_samples(),
+                WriteOptions::default().checksum(false),
+            )
+            .expect("writing must succeed");
+
+        let written = read_json(&sibling(&basename, ".sigmf-meta"));
+        assert_eq!(
+            written["global"].get("core:sha512"),
+            None,
+            "a hash of a dataset that no longer exists must not survive the write"
+        );
+        assert_valid(&written, "a recording written without a checksum");
+    }
+
+    /// A multi-channel Dataset is refused, and the refusal points at Collections.
+    ///
+    /// Not a limitation this crate invented: a `&[S]` has nowhere to say where one
+    /// channel ends and the next begins, so honouring `core:num_channels > 1` would
+    /// mean writing a datatype that describes something other than the bytes. The
+    /// specification's own advice is to use Collections instead, and the error says
+    /// so rather than reporting a bare refusal.
+    #[test]
+    fn a_multi_channel_recording_is_refused_and_the_error_names_collections() {
+        let dir = TempDir::new().expect("a temp dir");
+        let basename = dir.path().join("dsc_watch");
+
+        let mut recording = a_dsc_watch_recording("cf32_le");
+        recording.metadata.global.num_channels = Some(2);
+        let error = recording
+            .to_file(&basename, &dsc_samples())
+            .expect_err("two channels must be refused");
+
+        let message = error.to_string();
+        assert!(
+            message.contains("Collections"),
+            "the error must name the alternative the specification recommends: {message}"
+        );
+        assert!(
+            !sibling(&basename, ".sigmf-data").exists(),
+            "a refused write must not leave a dataset behind"
+        );
+
+        // One channel is what a typed buffer is, whether or not it is spelled out.
+        recording.metadata.global.num_channels = Some(1);
+        recording
+            .to_file(&basename, &dsc_samples())
+            .expect("one channel must be accepted");
+    }
+
+    /// A write interrupted between the two files leaves the Dataset, not the
+    /// sidecar.
+    ///
+    /// A `.sigmf-data` with no `.sigmf-meta` is visibly unfinished; a `.sigmf-meta`
+    /// describing a truncated `.sigmf-data` looks valid and lies about its length,
+    /// which is worse than an obvious failure. On a receiver that loses power
+    /// mid-capture that is the whole difference between a recording you can trust
+    /// and one you can only hope about.
+    ///
+    /// The interruption is staged by putting a directory where the Metadata file
+    /// belongs, so its write cannot succeed. The Dataset can only be on disk
+    /// afterwards if it was written first.
+    #[test]
+    fn the_dataset_is_written_before_the_metadata() {
+        let dir = TempDir::new().expect("a temp dir");
+        let basename = dir.path().join("dsc_watch");
+        fs::create_dir(sibling(&basename, ".sigmf-meta")).expect("blocking the metadata path");
+
+        let mut recording = a_dsc_watch_recording("cf32_le");
+        recording
+            .to_file(&basename, &dsc_samples())
+            .expect_err("the metadata write must fail");
+
+        assert!(
+            sibling(&basename, ".sigmf-data").exists(),
+            "the dataset must already be on disk when the metadata write fails"
+        );
+    }
+
+    /// A basename with a dot in it keeps all of itself.
+    ///
+    /// `dsc_16804.5kHz` is an ordinary name for an RF capture, and the two files of
+    /// a Recording are defined as sharing a basename — so the extension is appended
+    /// to whatever the caller gave, never substituted into it. Reaching for
+    /// `Path::set_extension` here would read `.5kHz` as an extension to replace and
+    /// quietly write `dsc_16804.sigmf-data` instead, leaving both files misnamed and
+    /// two captures an hour apart free to collide.
+    ///
+    /// Every other test in this module uses an undotted basename, where the wrong
+    /// implementation and the right one agree. This is the only one that can tell
+    /// them apart.
+    #[test]
+    fn a_basename_containing_a_dot_survives_intact() {
+        let dir = TempDir::new().expect("a temp dir");
+        let basename = dir.path().join("dsc_16804.5kHz");
+
+        let mut recording = a_dsc_watch_recording("cf32_le");
+        recording
+            .to_file(&basename, &dsc_samples())
+            .expect("writing must succeed");
+
+        assert!(
+            sibling(&basename, ".sigmf-data").exists(),
+            "the dataset must be dsc_16804.5kHz.sigmf-data, not dsc_16804.sigmf-data"
+        );
+        assert!(
+            sibling(&basename, ".sigmf-meta").exists(),
+            "the metadata must be dsc_16804.5kHz.sigmf-meta, not dsc_16804.sigmf-meta"
+        );
+    }
+
+    /// Every type in the sample vocabulary maps to the datatype the specification
+    /// spells it with.
+    ///
+    /// The width test below cannot see a mistake between two types of the same
+    /// width — `u32` declared `i32`, or either declared `f32` — and each of those
+    /// misreads a Dataset as thoroughly as a wrong width does. This pins all
+    /// sixteen by name.
+    #[test]
+    fn every_sample_type_maps_to_the_datatype_the_specification_spells_it() {
+        let le = Endianess::LittleEndian;
+        assert_eq!(DataFormat::of::<f32>(le).to_string(), "rf32_le");
+        assert_eq!(DataFormat::of::<f64>(le).to_string(), "rf64_le");
+        assert_eq!(DataFormat::of::<i32>(le).to_string(), "ri32_le");
+        assert_eq!(DataFormat::of::<i16>(le).to_string(), "ri16_le");
+        assert_eq!(DataFormat::of::<u32>(le).to_string(), "ru32_le");
+        assert_eq!(DataFormat::of::<u16>(le).to_string(), "ru16_le");
+        assert_eq!(DataFormat::of::<i8>(le).to_string(), "ri8");
+        assert_eq!(DataFormat::of::<u8>(le).to_string(), "ru8");
+
+        assert_eq!(DataFormat::of::<Complex<f32>>(le).to_string(), "cf32_le");
+        assert_eq!(DataFormat::of::<Complex<f64>>(le).to_string(), "cf64_le");
+        assert_eq!(DataFormat::of::<Complex<i32>>(le).to_string(), "ci32_le");
+        assert_eq!(DataFormat::of::<Complex<i16>>(le).to_string(), "ci16_le");
+        assert_eq!(DataFormat::of::<Complex<u32>>(le).to_string(), "cu32_le");
+        assert_eq!(DataFormat::of::<Complex<u16>>(le).to_string(), "cu16_le");
+        assert_eq!(DataFormat::of::<Complex<i8>>(le).to_string(), "ci8");
+        assert_eq!(DataFormat::of::<Complex<u8>>(le).to_string(), "cu8");
+
+        // Byte order is the caller's to choose, except where the specification says
+        // there is none to choose: one byte has no order, `ri8_le` is not a
+        // datatype, and `DataFormat`'s parser rejects it — so the writer must never
+        // emit it.
+        let be = Endianess::BigEndian;
+        assert_eq!(DataFormat::of::<f32>(be).to_string(), "rf32_be");
+        assert_eq!(DataFormat::of::<Complex<i16>>(be).to_string(), "ci16_be");
+        assert_eq!(DataFormat::of::<i8>(be).to_string(), "ri8");
+        assert_eq!(DataFormat::of::<Complex<u8>>(be).to_string(), "cu8");
+    }
+
+    /// Every sample type writes exactly the number of bytes its datatype declares.
+    ///
+    /// `impl_sample!` pairs a Rust type with a `DataType` by hand, sixteen times,
+    /// and nothing in the type system checks that pairing — the compiler will
+    /// cheerfully believe an `f64` is four bytes wide if the macro says so. A slip
+    /// there produces exactly the silent misinterpretation the sealed trait exists
+    /// to prevent, introduced by the mechanism meant to prevent it. So the width is
+    /// checked twice: against the Rust type, and against what reaches the disk.
+    #[test]
+    fn every_sample_type_writes_exactly_the_width_it_declares() {
+        fn check<S: Sample>(dir: &TempDir, sample: S, label: &str) {
+            let declared = DataFormat::of::<S>(Endianess::LittleEndian).size();
+            assert_eq!(
+                declared as usize,
+                std::mem::size_of::<S>(),
+                "{label}: core:datatype declares {declared} bytes a sample, the Rust type is {}",
+                std::mem::size_of::<S>()
+            );
+
+            let basename = dir.path().join(label);
+            let mut recording = a_dsc_watch_recording("cf32_le");
+            recording
+                .to_file(&basename, &[sample])
+                .expect("writing must succeed");
+
+            let on_disk = fs::metadata(sibling(&basename, ".sigmf-data"))
+                .expect("a dataset")
+                .len();
+            assert_eq!(
+                on_disk, declared,
+                "{label}: one sample declares {declared} bytes but wrote {on_disk}"
+            );
+        }
+
+        let dir = TempDir::new().expect("a temp dir");
+        check(&dir, 1.0f32, "rf32");
+        check(&dir, 1.0f64, "rf64");
+        check(&dir, 1i32, "ri32");
+        check(&dir, 1i16, "ri16");
+        check(&dir, 1u32, "ru32");
+        check(&dir, 1u16, "ru16");
+        check(&dir, 1i8, "ri8");
+        check(&dir, 1u8, "ru8");
+        check(&dir, Complex::new(1.0f32, 2.0), "cf32");
+        check(&dir, Complex::new(1.0f64, 2.0), "cf64");
+        check(&dir, Complex::new(1i32, 2), "ci32");
+        check(&dir, Complex::new(1i16, 2), "ci16");
+        check(&dir, Complex::new(1u32, 2), "cu32");
+        check(&dir, Complex::new(1u16, 2), "cu16");
+        check(&dir, Complex::new(1i8, 2), "ci8");
+        check(&dir, Complex::new(1u8, 2), "cu8");
+    }
 }

@@ -10,8 +10,32 @@ description = "A Rust library for interacting with SigMF recordings,"
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
 
+# The sample types the write path is generic over. `core:datatype`'s `c` prefix
+# means an interleaved I/Q pair, and Complex<T> is what the ecosystem already
+# calls that -- modelling it with our own type would force a conversion on every
+# caller for no gain.
+num-complex = { version = "0.4.6", default-features = false }
+
+# core:sha512, and nothing else.
+#
+# 0.10 rather than 0.11 deliberately. The cost of a hash crate to a library is
+# not its own weight, it is a duplicate of it in every consumer's tree: 0.10 is
+# what the ecosystem is on, so taking 0.11 would put a second sha2 and a second
+# digest into the tree of everyone who already has one, to buy an API this crate
+# calls exactly once. Revisit when consumers have moved, not before.
+sha2 = { version = "0.10.9", default-features = false }
+
 [dev-dependencies]
 pretty_assertions = "1.4.1"
+
+# Gives the write-path tests a directory that cleans itself up, so they cannot
+# collide with one another or leave debris behind on failure.
+tempfile = "3.23.0"
+
+# Asserts that code which must *not* compile does not. The seal on `Sample` is a
+# compile-time property, so a compile-time test is the only kind that can observe
+# it -- see tests/ui/.
+trybuild = "1.0.118"
 # Validates our fixtures and our output against the SigMF specification's own
 # machine-readable definition, vendored at tests/spec/sigmf-schema.json.
 #
