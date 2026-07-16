@@ -1,0 +1,22 @@
+{
+    "global": {
+        "core:datatype": "cf32_le",
+        "core:version": "1.2.6",
+        "core:sample_rate": 32000,
+        "core:description": "A geolocation carrying GeoJSON Foreign Members. RFC 7946 section 6.1 permits them, and the specification explicitly invites them here for position quality data: 'users MAY include Foreign Member fields here for user-defined purposes (position valid indication, GNSS SV counts, dillution of precision, accuracy, etc)'."
+    },
+    "captures": [
+        {
+            "core:sample_start": 0,
+            "core:frequency": 16804500,
+            "core:geolocation": {
+                "type": "Point",
+                "coordinates": [14.5053, -22.9576, 7.0],
+                "bbox": [14.5052, -22.9577, 14.5054, -22.9575],
+                "gnss:satellites": 11,
+                "gnss:hdop": 0.8
+            }
+        }
+    ],
+    "annotations": []
+}

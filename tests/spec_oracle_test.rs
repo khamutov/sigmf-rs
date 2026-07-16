@@ -52,6 +52,8 @@ const FIXTURES: &[&str] = &[
     "minimal.sigmf-meta",
     "global_geolocation.sigmf-meta",
     "capture_geolocation.sigmf-meta",
+    "geolocation_foreign_members.sigmf-meta",
+    "realistic_recording.sigmf-meta",
     "extensions.sigmf-meta",
     "scoped_extension_keys.sigmf-meta",
     "collection.sigmf-meta",
@@ -302,7 +304,6 @@ fn minimal_recording_survives_a_round_trip() {
 /// fields in real recordings, which means anyone who pointed this crate at a
 /// real-world file hit this immediately.
 #[test]
-#[ignore = "known-red: core:geolocation is typed Option<String>; clears when it becomes a typed GeoJSON Point"]
 fn global_geolocation_recording_opens() {
     let sigmf = SigMF::from_file(fixture_path("global_geolocation.sigmf-meta"))
         .expect("a recording carrying a global core:geolocation must open");
@@ -315,7 +316,6 @@ fn global_geolocation_recording_opens() {
 /// catch-all either, so the preferred spelling of the most common optional field
 /// is read, discarded, and reported as success.
 #[test]
-#[ignore = "known-red: CaptureMetadata has no core:geolocation field and no catch-all; clears when it gains either"]
 fn capture_scope_geolocation_survives_a_round_trip() {
     assert_round_trip_preserves_keys("capture_geolocation.sigmf-meta");
 
@@ -324,6 +324,90 @@ fn capture_scope_geolocation_survives_a_round_trip() {
         written["captures"][0]["core:geolocation"]["coordinates"],
         json!([14.5053, -22.9576, 7.0]),
         "GeoJSON is longitude, latitude, altitude — in that order"
+    );
+}
+
+/// A recording using every field this milestone typed, at once.
+///
+/// The three fixes landed here — a Global geolocation, a Captures geolocation, and
+/// a declared `core:extensions` — each have their own fixture. This one puts them
+/// in a single file, in the shape a real receiver writes, because a Recording that
+/// exercises one typed field at a time is not evidence about a Recording that
+/// exercises all of them: `core:geolocation` and `core:extensions` are typed fields
+/// sitting beside a `#[serde(flatten)]` catch-all, and serde resolves that
+/// combination by buffering, which is exactly where a field can go missing without
+/// anyone writing a line of wrong code.
+#[test]
+fn a_realistic_recording_opens_with_every_typed_field_populated() {
+    let sigmf = SigMF::from_file(fixture_path("realistic_recording.sigmf-meta"))
+        .expect("a recording using all of these at once must open");
+
+    let global_position = sigmf
+        .metadata
+        .global
+        .geolocation
+        .as_ref()
+        .expect("the Global fallback position");
+    assert_eq!(global_position.longitude, 14.5053);
+    assert_eq!(global_position.latitude, -22.9576);
+    assert_eq!(global_position.altitude, None);
+
+    let capture_position = sigmf.metadata.captures[0]
+        .geolocation
+        .as_ref()
+        .expect("the preferred Captures position");
+    assert_eq!(capture_position.altitude, Some(7.0));
+
+    let declared = sigmf
+        .metadata
+        .global
+        .extensions
+        .as_ref()
+        .expect("the declared extension list");
+    assert_eq!(declared[0].name, "antenna");
+    assert!(
+        declared[0].optional,
+        "antenna is descriptive: a reader that skips it still gets every sample"
+    );
+
+    assert_eq!(
+        sigmf
+            .metadata
+            .global
+            .get_extension::<AntennaGlobal>()
+            .expect("the antenna keys are well-formed"),
+        Some(AntennaGlobal {
+            model: "Wellbrook ALA1530".to_string(),
+            ..Default::default()
+        })
+    );
+
+    assert_round_trip_preserves_keys("realistic_recording.sigmf-meta");
+}
+
+/// A geolocation's GeoJSON Foreign Members survive a round-trip.
+///
+/// RFC 7946 section 6.1 permits arbitrary extra members on a GeoJSON object, and
+/// the schema does not close `core:geolocation` against them — it invites them, in
+/// its own words, for "position valid indication, GNSS SV counts, dillution of
+/// precision, accuracy". So a typed Point that models only `type`, `coordinates`,
+/// and `bbox` reads a real file, drops the fields it did not expect, and reports
+/// success — the same defect as the missing capture-scope catch-all, one scope
+/// further down.
+///
+/// This test exists because that is the shape a typed geolocation naturally takes
+/// if you write it from the schema's `properties` list and stop there.
+#[test]
+fn geolocation_foreign_members_survive_a_round_trip() {
+    assert_round_trip_preserves_keys("geolocation_foreign_members.sigmf-meta");
+
+    let written = round_trip("geolocation_foreign_members.sigmf-meta");
+    let geolocation = &written["captures"][0]["core:geolocation"];
+    assert_eq!(geolocation["gnss:satellites"], json!(11));
+    assert_eq!(geolocation["gnss:hdop"], json!(0.8));
+    assert_eq!(
+        geolocation["bbox"],
+        json!([14.5052, -22.9577, 14.5054, -22.9575])
     );
 }
 
@@ -342,7 +426,6 @@ fn capture_scope_geolocation_survives_a_round_trip() {
 /// over `core:num_channels` for multi-channel IQ — which is exactly the shape a
 /// six-band receiver needs.
 #[test]
-#[ignore = "known-red: `extensions` and `collection` share a serde rename; clears when `extensions` is renamed to core:extensions AND retyped together -- see the doc comment, the rename alone is a regression"]
 fn collection_field_binds_the_core_collection_key() {
     let sigmf = SigMF::from_file(fixture_path("collection.sigmf-meta")).expect("must open");
     assert_eq!(
@@ -387,7 +470,6 @@ fn scoped_extension_keys_survive_a_round_trip() {
 /// extension accessors are entirely unconnected code — which is plausibly why
 /// nobody noticed the field was dead: nothing in the crate ever reads it.
 #[test]
-#[ignore = "known-red: set_extension writes namespaced keys but never declares the namespace; clears when it maintains core:extensions"]
 fn set_extension_declares_the_extension_it_writes() {
     let mut sigmf = SigMF::from_file(fixture_path("minimal.sigmf-meta")).expect("must open");
     sigmf

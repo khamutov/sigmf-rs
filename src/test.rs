@@ -91,12 +91,34 @@ fn test_parse_metadata_with_antenna() -> Result<(), Box<dyn Error>> {
     );
     assert_eq!(
         metadata.global.get_extension::<AntennaGlobal>()?,
-        AntennaGlobal {
+        Some(AntennaGlobal {
             model: "ARA CSB-16".to_string(),
             antenna_type: Some("dipole".to_string()),
             ..Default::default()
-        }
+        })
     );
+    Ok(())
+}
+
+/// Asking for an extension the Recording does not carry is an answer, not an error.
+///
+/// This used to report `missing field 'antenna:model'` — a `serde_json::Error`
+/// describing a field the caller never mentioned, for a file that is perfectly
+/// valid. There was no way to ask "is this extension present?" without matching on
+/// an error message.
+#[test]
+fn absent_extension_reads_as_none() -> Result<(), Box<dyn Error>> {
+    let json_data = r#"{
+        "global": {
+            "core:datatype": "rf32_le",
+            "core:version": "1.2.6"
+        },
+        "captures": [],
+        "annotations": []
+    }"#;
+    let metadata = Metadata::from_str(json_data, &[])?;
+
+    assert_eq!(metadata.global.get_extension::<AntennaGlobal>()?, None);
     Ok(())
 }
 
@@ -128,6 +150,12 @@ fn test_parse_roundtrip() -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
+/// Rewriting an extension's fields also declares the namespace.
+///
+/// The expected output below gained `core:extensions` when `set_extension` learned
+/// to declare what it writes. That is worth pausing on: until then this test
+/// asserted, byte for byte, output that violates the specification — an undeclared
+/// `antenna:model`. The suite was not merely blind to the defect, it required it.
 #[test]
 fn test_parse_roundtrip_with_extention() -> Result<(), Box<dyn Error>> {
     let json_data = r#"{
@@ -144,6 +172,13 @@ fn test_parse_roundtrip_with_extention() -> Result<(), Box<dyn Error>> {
   "global": {
     "core:datatype": "rf32_le",
     "core:version": "1.0.0",
+    "core:extensions": [
+      {
+        "name": "antenna",
+        "version": "1.0.0",
+        "optional": true
+      }
+    ],
     "antenna:model": "new model"
   },
   "captures": [],
@@ -152,12 +187,38 @@ fn test_parse_roundtrip_with_extention() -> Result<(), Box<dyn Error>> {
     let data = vec![];
     let mut metadata = Metadata::from_str(json_data, &data)?;
 
-    let mut antenna: AntennaGlobal = metadata.global.get_extension()?;
+    let mut antenna: AntennaGlobal = metadata
+        .global
+        .get_extension()?
+        .expect("the fixture carries antenna keys");
     antenna.model = "new model".to_string();
     antenna.antenna_type = None;
     metadata.global.set_extension(antenna)?;
 
     assert_eq!(metadata.to_str()?, json_expected);
+    Ok(())
+}
+
+/// Declaring a namespace twice replaces the declaration rather than duplicating it.
+#[test]
+fn setting_an_extension_twice_declares_it_once() -> Result<(), Box<dyn Error>> {
+    let mut global = GlobalMetadata::new("rf32_le".parse()?);
+
+    for model in ["ARA CSB-16", "Wellbrook ALA1530"] {
+        global.set_extension(AntennaGlobal {
+            model: model.to_string(),
+            ..Default::default()
+        })?;
+    }
+
+    assert_eq!(
+        global.extensions,
+        Some(vec![Extension {
+            name: "antenna".to_string(),
+            version: "1.0.0".to_string(),
+            optional: true,
+        }])
+    );
     Ok(())
 }
 
@@ -187,6 +248,51 @@ fn test_parse_roundtrip_with_extention_removal() -> Result<(), Box<dyn Error>> {
     metadata.global.delete_extension::<AntennaGlobal>()?;
 
     assert_eq!(metadata.to_str()?, json_expected);
+    Ok(())
+}
+
+/// Deleting an extension retracts its declaration, and leaves other declarations
+/// alone.
+///
+/// A stale declaration is not cosmetic. A non-`optional` one instructs a reader to
+/// refuse a Recording it cannot support — so leaving one behind for data that is no
+/// longer there tells readers to reject a file that is now perfectly parseable.
+#[test]
+fn deleting_an_extension_undeclares_only_that_extension() -> Result<(), Box<dyn Error>> {
+    let json_data = r#"{
+        "global": {
+            "core:datatype": "rf32_le",
+            "core:version": "1.2.6",
+            "core:extensions": [
+                { "name": "antenna", "version": "1.0.0", "optional": true },
+                { "name": "capture_details", "version": "1.0.0", "optional": false }
+            ],
+            "antenna:model": "ARA CSB-16",
+            "capture_details:emitter": "coast-station"
+        },
+        "captures": [],
+        "annotations": []
+    }"#;
+    let mut metadata = Metadata::from_str(json_data, &[])?;
+
+    metadata.global.delete_extension::<AntennaGlobal>()?;
+
+    assert_eq!(
+        metadata.global.extensions,
+        Some(vec![Extension {
+            name: "capture_details".to_string(),
+            version: "1.0.0".to_string(),
+            optional: false,
+        }]),
+        "only the deleted namespace loses its declaration"
+    );
+    assert!(
+        metadata
+            .global
+            .other
+            .contains_key("capture_details:emitter"),
+        "the other namespace's data is untouched"
+    );
     Ok(())
 }
 

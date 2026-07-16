@@ -1,0 +1,33 @@
+{
+    "global": {
+        "core:datatype": "cf32_le",
+        "core:version": "1.2.6",
+        "core:sample_rate": 32000,
+        "core:description": "A coast-station DSC watch on 16 MHz, heard at a fixed receiving site. Carries a position in both scopes at once, which the schema permits: the Captures one is preferred and the Global one is the fallback a reader uses when no segment declares its own.",
+        "core:recorder": "winradio-agent",
+        "core:extensions": [
+            {
+                "name": "antenna",
+                "version": "1.0.0",
+                "optional": true
+            }
+        ],
+        "core:geolocation": {
+            "type": "Point",
+            "coordinates": [14.5053, -22.9576]
+        },
+        "antenna:model": "Wellbrook ALA1530"
+    },
+    "captures": [
+        {
+            "core:sample_start": 0,
+            "core:frequency": 16804500,
+            "core:datetime": "2026-07-16T09:14:22.000Z",
+            "core:geolocation": {
+                "type": "Point",
+                "coordinates": [14.5053, -22.9576, 7.0]
+            }
+        }
+    ],
+    "annotations": []
+}

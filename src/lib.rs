@@ -156,14 +156,27 @@ pub mod sigmf {
         #[serde(rename = "core:hw")]
         pub hw: Option<String>,
 
+        /// The location of the recording system.
+        ///
+        /// The Captures scope ([`CaptureMetadata::geolocation`]) is preferred; the
+        /// schema keeps this one for backwards compatibility and notes that fixed
+        /// recording systems may still use it, so a reader should check this when
+        /// the Captures field is absent.
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "core:geolocation")]
-        pub geolocation: Option<String>,
+        pub geolocation: Option<Geolocation>,
 
+        /// The SigMF extension namespaces this Recording uses.
+        ///
+        /// Maintained by [`set_extension`](Self::set_extension) and
+        /// [`delete_extension`](Self::delete_extension); a reader consults it to
+        /// learn which namespaces it must understand before parsing.
         #[serde(skip_serializing_if = "Option::is_none")]
-        #[serde(rename = "core:collection")]
-        pub extensions: Option<String>,
+        #[serde(rename = "core:extensions")]
+        pub extensions: Option<Vec<Extension>>,
 
+        /// The base name of the `.sigmf-collection` this Recording belongs to, if
+        /// it is part of a Collection.
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "core:collection")]
         pub collection: Option<String>,
@@ -226,6 +239,15 @@ pub mod sigmf {
         #[serde(rename = "core:datetime")]
         pub datetime: Option<String>,
 
+        /// The location of the recording system at the start of this segment.
+        ///
+        /// The schema states this is the preferred home for a position, in
+        /// preference to [`GlobalMetadata::geolocation`], because it can track a
+        /// moving receiver across segments.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        #[serde(rename = "core:geolocation")]
+        pub geolocation: Option<Geolocation>,
+
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "core:header_bytes")]
         pub header_bytes: Option<u64>,
@@ -273,8 +295,216 @@ pub mod sigmf {
         pub uuid: Option<String>,
     }
 
+    /// The location of a recording system: the value of `core:geolocation`.
+    ///
+    /// The specification requires a single [RFC 7946] GeoJSON Point here, and
+    /// states that the Captures scope ([`CaptureMetadata::geolocation`]) is the
+    /// preferred home for it, with the Global scope
+    /// ([`GlobalMetadata::geolocation`]) kept for backwards compatibility and for
+    /// fixed receiving sites.
+    ///
+    /// GeoJSON writes a position as a bare array whose meaning is purely
+    /// positional — `[longitude, latitude]`, never the reverse. That is the
+    /// opposite order to how coordinates are usually spoken and written, and a
+    /// transposed pair does not fail: it is a valid position somewhere else on
+    /// Earth. The components are named here so that the caller states the order
+    /// rather than remembers it; the array is assembled on the way out.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sigmf::sigmf::Geolocation;
+    ///
+    /// // Walvis Bay: 14.5° east, 22.96° south, 7 m above the ellipsoid.
+    /// let heard_at = Geolocation {
+    ///     altitude: Some(7.0),
+    ///     ..Geolocation::new(14.5053, -22.9576)
+    /// };
+    ///
+    /// let json = serde_json::to_string(&heard_at).unwrap();
+    /// assert_eq!(
+    ///     json,
+    ///     r#"{"type":"Point","coordinates":[14.5053,-22.9576,7.0]}"#
+    /// );
+    /// ```
+    ///
+    /// [RFC 7946]: https://www.rfc-editor.org/rfc/rfc7946
+    #[derive(Debug, PartialEq, Clone, Deserialize, Serialize)]
+    #[serde(try_from = "GeolocationWire", into = "GeolocationWire")]
+    pub struct Geolocation {
+        /// Degrees east of the prime meridian, WGS84. The **first** element of the
+        /// GeoJSON coordinate array.
+        pub longitude: f64,
+
+        /// Degrees north of the equator, WGS84. The **second** element.
+        pub latitude: f64,
+
+        /// Metres above the WGS84 ellipsoid — which is neither height above sea
+        /// level nor height above ground. The optional third element.
+        pub altitude: Option<f64>,
+
+        /// The GeoJSON bounding box, if the writer supplied one.
+        ///
+        /// Degenerate for a Point and rarely present, but a standard GeoJSON
+        /// member rather than a foreign one, so it is modelled rather than left to
+        /// [`other`](Self::other). Left as a bare `Vec` because that is all the
+        /// schema constrains it to: at least four numbers.
+        pub bbox: Option<Vec<f64>>,
+
+        /// GeoJSON *Foreign Members* — any other key on the Point object.
+        ///
+        /// RFC 7946 section 6.1 permits these, and the specification explicitly
+        /// invites them for position quality data (GNSS satellite counts, dilution
+        /// of precision, accuracy). They are kept verbatim so that a read→write
+        /// cycle does not delete a field it did not model.
+        ///
+        /// The specification names one restriction this type does not enforce:
+        /// members called `geometry` or `properties` are prohibited on a non-Feature
+        /// GeoJSON object (RFC 7946 section 7.1). Enforcing it on *read* would make
+        /// a file the specification's own validator accepts fail to open, which is
+        /// the failure this type was written to end.
+        pub other: Map<String, Value>,
+    }
+
+    impl Geolocation {
+        /// A position with no altitude, no bounding box, and no foreign members.
+        ///
+        /// There is deliberately no [`Default`]: a default position is `0, 0`, a
+        /// point in the Gulf of Guinea that is indistinguishable from a real
+        /// measurement.
+        ///
+        /// The arguments are in GeoJSON's own order — longitude first.
+        pub fn new(longitude: f64, latitude: f64) -> Geolocation {
+            Geolocation {
+                longitude,
+                latitude,
+                altitude: None,
+                bbox: None,
+                other: Map::new(),
+            }
+        }
+    }
+
+    /// The shape `core:geolocation` takes on the wire.
+    ///
+    /// Exists so [`Geolocation`] can name its components while still reading and
+    /// writing the positional array GeoJSON requires.
+    #[derive(Deserialize, Serialize)]
+    struct GeolocationWire {
+        #[serde(rename = "type")]
+        geometry_type: PointType,
+
+        coordinates: Vec<f64>,
+
+        #[serde(skip_serializing_if = "Option::is_none")]
+        bbox: Option<Vec<f64>>,
+
+        #[serde(flatten)]
+        other: Map<String, Value>,
+    }
+
+    /// GeoJSON's `type` discriminator, which the schema pins to exactly `Point`.
+    ///
+    /// A one-variant enum rather than a checked `String`: the check becomes serde's
+    /// job, and a `Geolocation` that is somehow not a Point is unrepresentable.
+    #[derive(Deserialize, Serialize)]
+    enum PointType {
+        Point,
+    }
+
+    impl TryFrom<GeolocationWire> for Geolocation {
+        // Unreachable as public API — `GeolocationWire` is private, so serde is the
+        // only caller and it stringifies this immediately via `Error::custom`.
+        type Error = String;
+
+        fn try_from(wire: GeolocationWire) -> Result<Self, Self::Error> {
+            let (longitude, latitude, altitude) = match wire.coordinates[..] {
+                [longitude, latitude] => (longitude, latitude, None),
+                [longitude, latitude, altitude] => (longitude, latitude, Some(altitude)),
+                _ => {
+                    return Err(format!(
+                        "a GeoJSON Point's coordinates are longitude, latitude, and \
+                         an optional altitude, so 2 or 3 numbers; got {}",
+                        wire.coordinates.len()
+                    ))
+                }
+            };
+
+            Ok(Geolocation {
+                longitude,
+                latitude,
+                altitude,
+                bbox: wire.bbox,
+                other: wire.other,
+            })
+        }
+    }
+
+    impl From<Geolocation> for GeolocationWire {
+        fn from(geolocation: Geolocation) -> Self {
+            let mut coordinates = vec![geolocation.longitude, geolocation.latitude];
+            coordinates.extend(geolocation.altitude);
+
+            GeolocationWire {
+                geometry_type: PointType::Point,
+                coordinates,
+                bbox: geolocation.bbox,
+                other: geolocation.other,
+            }
+        }
+    }
+
+    /// One entry of `core:extensions`: a SigMF extension namespace this Recording
+    /// uses.
+    ///
+    /// The declaration is how a reader learns it needs to support a namespace
+    /// *before* parsing. The schema requires all three fields and permits no
+    /// others, which is what [`deny_unknown_fields`] mirrors.
+    ///
+    /// [`deny_unknown_fields`]: https://serde.rs/container-attrs.html#deny_unknown_fields
+    #[derive(Debug, PartialEq, Eq, Clone, Deserialize, Serialize)]
+    #[serde(deny_unknown_fields)]
+    pub struct Extension {
+        /// The name of the extension namespace, e.g. `antenna` for `antenna:model`.
+        pub name: String,
+
+        /// The version of the extension namespace specification used.
+        pub version: String,
+
+        /// Whether a reader may ignore this extension.
+        ///
+        /// `false` means an application MUST support the extension in order to
+        /// parse the Recording, and SHOULD report an error if it does not.
+        ///
+        /// Read that direction carefully, because the specification states it both
+        /// ways. The schema's description of *this property* says the inverse — "If
+        /// this field is `true`, the extension is REQUIRED to parse this Recording"
+        /// — and it is simply wrong upstream: the field's name, the description of
+        /// `core:extensions` itself, and the worked example accompanying it all
+        /// agree with the reading above. Being a `bool` under either reading, this
+        /// is a contradiction no validator can catch.
+        pub optional: bool,
+    }
+
+    /// A typed view of one extension namespace's fields in the Global object.
     pub trait GlobalExtension {
+        /// The namespace this extension's keys are prefixed with, without the
+        /// colon — `antenna` for `antenna:model`.
         fn namespace() -> String;
+
+        /// The version of the extension namespace specification this type models,
+        /// as it should appear in `core:extensions`.
+        fn version() -> String;
+
+        /// Whether a reader may ignore this extension, for the declaration written
+        /// into `core:extensions`. See [`Extension::optional`].
+        ///
+        /// Defaults to `true`, which suits a descriptive extension: a reader that
+        /// skips `antenna:*` still gets every sample. Override it for an extension
+        /// that a reader must understand to interpret the Dataset at all.
+        fn optional() -> bool {
+            true
+        }
     }
 
     #[derive(Debug, PartialEq, Deserialize, Serialize)]
@@ -365,6 +595,12 @@ pub mod sigmf {
         fn namespace() -> String {
             return "antenna".to_string();
         }
+
+        /// The version upstream's `extensions/antenna-schema.json` records in its
+        /// own `$id`: `.../spec/1.0.0/extensions/antenna-schema`.
+        fn version() -> String {
+            "1.0.0".to_string()
+        }
     }
 
     #[derive(Debug)]
@@ -435,12 +671,52 @@ pub mod sigmf {
             }
         }
 
+        /// Read one extension namespace's fields, or `None` if this Recording
+        /// carries none of them.
+        ///
+        /// Presence is decided by the data — whether any `namespace:` key is
+        /// present — and not by whether `core:extensions` declares the namespace.
+        /// Undeclared extension data is a spec violation on the part of whoever
+        /// wrote the file (one this crate itself committed until it learned to
+        /// declare what it writes), but the data is there and refusing to read it
+        /// would help nobody.
         pub fn get_extension<T: GlobalExtension + serde::de::DeserializeOwned>(
             &self,
-        ) -> Result<T, serde_json::Error> {
-            serde_json::from_value(serde_json::json!(self.other))
+        ) -> Result<Option<T>, serde_json::Error> {
+            let namespace_pattern = T::namespace() + ":";
+            if !self
+                .other
+                .keys()
+                .any(|k| k.starts_with(namespace_pattern.as_str()))
+            {
+                return Ok(None);
+            }
+            serde_json::from_value(serde_json::json!(self.other)).map(Some)
         }
 
+        /// Write one extension namespace's fields, replacing any already present,
+        /// and declare the namespace in `core:extensions`.
+        ///
+        /// The declaration is not a nicety: the specification is explicit that
+        /// `core:extensions` is how a reader learns it needs to support a namespace
+        /// before parsing, so writing `antenna:model` without it emits a file a
+        /// conformant reader cannot know how to handle.
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// use sigmf::sigmf::{AntennaGlobal, GlobalMetadata};
+        ///
+        /// let mut global = GlobalMetadata::new("cf32_le".parse()?);
+        /// global.set_extension(AntennaGlobal {
+        ///     model: "Wellbrook ALA1530".to_string(),
+        ///     ..Default::default()
+        /// })?;
+        ///
+        /// let declared = global.extensions.as_ref().expect("the namespace is declared");
+        /// assert_eq!(declared[0].name, "antenna");
+        /// # Ok::<(), Box<dyn std::error::Error>>(())
+        /// ```
         pub fn set_extension<T: GlobalExtension + serde::Serialize>(
             &mut self,
             val: T,
@@ -452,6 +728,7 @@ pub mod sigmf {
                         self.other
                             .retain(|k, _| !k.starts_with(namespace_pattern.as_str()));
                         self.other.extend(d);
+                        self.declare_extension::<T>();
                         Ok(())
                     }
                     _ => Err(MetadataError::Internal(
@@ -462,12 +739,36 @@ pub mod sigmf {
             }
         }
 
-        pub fn delete_extension<T: GlobalExtension + serde::Serialize>(
-            &mut self,
-        ) -> Result<(), MetadataError> {
+        /// Record `T`'s namespace in `core:extensions`, replacing any existing
+        /// declaration of the same namespace rather than duplicating it.
+        fn declare_extension<T: GlobalExtension>(&mut self) {
+            let declaration = Extension {
+                name: T::namespace(),
+                version: T::version(),
+                optional: T::optional(),
+            };
+
+            let declared = self.extensions.get_or_insert_with(Vec::new);
+            match declared.iter_mut().find(|e| e.name == declaration.name) {
+                Some(existing) => *existing = declaration,
+                None => declared.push(declaration),
+            }
+        }
+
+        /// Remove one extension namespace's fields and its `core:extensions`
+        /// declaration.
+        ///
+        /// The declaration goes with the data: leaving it behind would announce an
+        /// extension the Recording no longer uses, which for a non-`optional` one
+        /// tells a reader to refuse a file it could in fact parse.
+        pub fn delete_extension<T: GlobalExtension>(&mut self) -> Result<(), MetadataError> {
             let namespace_pattern = T::namespace() + ":";
             self.other
                 .retain(|k, _| !k.starts_with(namespace_pattern.as_str()));
+
+            if let Some(declared) = &mut self.extensions {
+                declared.retain(|e| e.name != T::namespace());
+            }
             Ok(())
         }
     }

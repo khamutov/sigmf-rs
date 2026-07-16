@@ -50,6 +50,25 @@ file and writing it back cannot silently alter a required field.
 
 The oracle raises the floor; it does not remove the need to read.
 
+## The schema is open by default; a Rust struct is closed by default
+
+Reach for the schema's `properties` list when adding a typed field and you will
+write a type that models exactly those keys and silently discards the rest. Most
+SigMF objects permit more than they list — that is how namespaced extension keys
+are legal at all, and `core:geolocation` goes further by explicitly inviting RFC
+7946 GeoJSON *Foreign Members* for position quality data. A type built from the
+`properties` list alone reads a real file, drops what it did not expect, and reports
+success.
+
+So: before typing any object, check whether the schema closes it with
+`additionalProperties: false`. If it does not, the type needs a
+`#[serde(flatten)]` catch-all. Exactly one object in this crate is closed — the
+items of `core:extensions`, which the specification says MUST NOT contain other
+fields, and which therefore carries `deny_unknown_fields` to match.
+
+The oracle will not save you here: a Point with its foreign members stripped
+validates perfectly. Only a round-trip test that compares key sets catches it.
+
 ## Known-red tests
 
 Some tests are `#[ignore]`d because they fail today, each pinning a real defect
@@ -58,6 +77,17 @@ a test written after a fix tests the fix, while a test written before it tests t
 bug. When you fix something, remove the `#[ignore]` — do not rewrite the
 assertion. If an assertion has to change to go green, it was testing the wrong
 thing (see the note on typed fields under Tests).
+
+That rule is about *these* tests, which are judged against the vendored schema. It
+does not extend to a test that predates the defect being fixed. Some tests here
+assert today's behaviour byte-for-byte, and where today's behaviour is wrong they
+assert the bug: `test_parse_roundtrip_with_extention` pinned an expected document
+containing extension data with no `core:extensions` declaration — a spec violation —
+so teaching `set_extension` to declare its namespace turned a *green* test red, and
+editing that expectation was the fix rather than a cover-up. Tell the two cases
+apart by asking what the assertion is measured against. Against the specification:
+never edit it. Against a remembered output: it is only as right as the code was on
+the day it was written.
 
 # Code conventions
 
