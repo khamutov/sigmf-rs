@@ -104,7 +104,7 @@ pub mod sigmf {
         }
     }
 
-    #[derive(Debug, Deserialize, Serialize)]
+    #[derive(Debug, PartialEq, Deserialize, Serialize)]
     pub struct GlobalMetadata {
         #[serde(rename = "core:datatype")]
         pub datatype: DataFormat,
@@ -193,33 +193,13 @@ pub mod sigmf {
         #[serde(rename = "core:trailing_bytes")]
         pub trailing_bytes: Option<u64>,
 
+        /// Every key in the Global object that the fields above do not model.
+        ///
+        /// This is where extension data such as `antenna:model` lives, and what
+        /// [`get_extension`](Self::get_extension) and
+        /// [`set_extension`](Self::set_extension) read and write through.
         #[serde(flatten)]
         pub other: Map<String, Value>,
-    }
-
-    impl PartialEq for GlobalMetadata {
-        fn eq(&self, other: &Self) -> bool {
-            self.datatype == other.datatype
-                && self.sample_rate == other.sample_rate
-                && self.version == other.version
-                && self.num_channels == other.num_channels
-                && self.sha512 == other.sha512
-                && self.offset == other.offset
-                && self.description == other.description
-                && self.author == other.author
-                && self.meta_doi == other.meta_doi
-                && self.data_doi == other.data_doi
-                && self.recorder == other.recorder
-                && self.license == other.license
-                && self.hw == other.hw
-                && self.geolocation == other.geolocation
-                && self.extensions == other.extensions
-                && self.collection == other.collection
-                && self.metadata_only == other.metadata_only
-                && self.dataset == other.dataset
-                && self.trailing_bytes == other.trailing_bytes
-                && self.other == other.other
-        }
     }
 
     #[derive(Debug, PartialEq, Deserialize, Serialize)]
@@ -251,6 +231,17 @@ pub mod sigmf {
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "core:header_bytes")]
         pub header_bytes: Option<u64>,
+
+        /// Every key in this Captures segment that the fields above do not model.
+        ///
+        /// The schema sets `additionalProperties: true` on a Captures segment, so
+        /// keys outside `core:` are not merely tolerated here — they are the whole
+        /// mechanism by which extension namespaces attach per-segment data, and
+        /// `antenna:azimuth_angle` on a rotating antenna is the ordinary case, not
+        /// an exotic one. Without this field such a key is read into nothing and
+        /// written back as nothing.
+        #[serde(flatten)]
+        pub other: Map<String, Value>,
 
         #[serde(skip)]
         #[serde(default = "default_capture_boundaries")]
@@ -293,6 +284,16 @@ pub mod sigmf {
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "core:uuid")]
         pub uuid: Option<String>,
+
+        /// Every key in this annotation that the fields above do not model.
+        ///
+        /// The schema sets `additionalProperties: true` on an annotation. This is
+        /// the scope where the catch-all matters most: an annotation exists to say
+        /// something about a span of samples that `core:` has no vocabulary for, so
+        /// the interesting content is *expected* to live under an extension
+        /// namespace. See [`CaptureMetadata::other`].
+        #[serde(flatten)]
+        pub other: Map<String, Value>,
     }
 
     /// The location of a recording system: the value of `core:geolocation`.

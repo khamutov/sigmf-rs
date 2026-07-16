@@ -71,8 +71,8 @@ validates perfectly. Only a round-trip test that compares key sets catches it.
 
 ## Known-red tests
 
-Some tests are `#[ignore]`d because they fail today, each pinning a real defect
-and naming the condition that will clear it. They are written *before* the fixes:
+A defect that is understood but not yet fixed is pinned by an `#[ignore]`d test
+naming the condition that will clear it. Such tests are written *before* the fixes:
 a test written after a fix tests the fix, while a test written before it tests the
 bug. When you fix something, remove the `#[ignore]` — do not rewrite the
 assertion. If an assertion has to change to go green, it was testing the wrong

@@ -7,14 +7,14 @@
 //! prose. There is no prose left to read — upstream withdrew `sigmf-spec.md` and
 //! now generates its documentation *from* this schema.
 //!
-//! # Why some tests here are `#[ignore]`d
+//! # Known-red tests
 //!
-//! Each ignored test pins a defect that exists right now, and states the change
-//! that will clear it. They are written before the fixes, not after, and that
-//! ordering is the point: a test written after a fix tests the fix, while a test
-//! written before it tests the bug. Un-ignore one and it should fail for exactly
-//! the reason its attribute states — if it fails for a different reason, or
-//! passes, the defect was not what we thought it was.
+//! A defect this crate has not yet fixed is pinned here by an `#[ignore]`d test
+//! naming the change that will clear it. Such a test is written *before* the fix,
+//! not after, and that ordering is the point: a test written after a fix tests the
+//! fix, while a test written before it tests the bug. Un-ignore one and it should
+//! fail for exactly the reason its attribute states — if it fails for a different
+//! reason, or passes, the defect was not what we thought it was.
 //!
 //! Fix a defect by deleting its `#[ignore]`, never by editing its assertion. An
 //! assertion that has to change to go green was testing the wrong thing.
@@ -146,14 +146,84 @@ fn round_trip(name: &str) -> Value {
         .unwrap_or_else(|e| panic!("{name} serialized to something that is not JSON: {e}"))
 }
 
-/// A read→write cycle must not lose a single key, in any scope, and must leave a
-/// document the specification still accepts.
-fn assert_round_trip_preserves_keys(name: &str) {
-    let before = key_paths(&read_json(&fixture_path(name)));
-    let written = round_trip(name);
-    let after = key_paths(&written);
+/// Compare two JSON numbers as numbers rather than as text.
+///
+/// A `core:frequency` of `16804500` is read into an `f64` and written back as
+/// `16804500.0`. JSON has a single number type and the schema types the field
+/// `number`, so both spellings carry the same value and the schema accepts each;
+/// a textual comparison would report a difference that does not exist. Comparing
+/// through `as_f64` alone has the opposite failure — it silently equates distinct
+/// integers past 2^53 — so integers are compared exactly and the float path is
+/// taken only when one side really is a float.
+fn numbers_equal(a: &serde_json::Number, b: &serde_json::Number) -> bool {
+    if let (Some(x), Some(y)) = (a.as_u64(), b.as_u64()) {
+        return x == y;
+    }
+    if let (Some(x), Some(y)) = (a.as_i64(), b.as_i64()) {
+        return x == y;
+    }
+    a.as_f64() == b.as_f64()
+}
 
-    let lost: Vec<&String> = before.difference(&after).collect();
+/// Record every path at which `before` and `after` carry different values.
+///
+/// Keys present on one side only are deliberately ignored here; the key-set
+/// assertions report those, and with a better message.
+fn diff_values(before: &Value, after: &Value, path: &str, out: &mut Vec<String>) {
+    match (before, after) {
+        (Value::Object(a), Value::Object(b)) => {
+            for (key, child) in a {
+                let child_path = if path.is_empty() {
+                    key.clone()
+                } else {
+                    format!("{path}/{key}")
+                };
+                if let Some(counterpart) = b.get(key) {
+                    diff_values(child, counterpart, &child_path, out);
+                }
+            }
+        }
+        (Value::Array(a), Value::Array(b)) => {
+            if a.len() != b.len() {
+                out.push(format!(
+                    "{path}: array of {} became an array of {}",
+                    a.len(),
+                    b.len()
+                ));
+                return;
+            }
+            for (index, (x, y)) in a.iter().zip(b).enumerate() {
+                diff_values(x, y, &format!("{path}/{index}"), out);
+            }
+        }
+        (Value::Number(a), Value::Number(b)) => {
+            if !numbers_equal(a, b) {
+                out.push(format!("{path}: {a} became {b}"));
+            }
+        }
+        _ => {
+            if before != after {
+                out.push(format!("{path}: {before} became {after}"));
+            }
+        }
+    }
+}
+
+/// A read→write cycle must change nothing, and must leave a document the
+/// specification still accepts.
+///
+/// "Nothing" is three separate claims, and the crate has historically failed the
+/// first while looking healthy: no key is lost, no key is invented, and every
+/// value that survives is the value that went in. Checking only the first is what
+/// let a writer delete a field it could not model and report success.
+fn assert_round_trip_is_lossless(name: &str) {
+    let before = read_json(&fixture_path(name));
+    let written = round_trip(name);
+
+    let before_keys = key_paths(&before);
+    let after_keys = key_paths(&written);
+
+    let lost: Vec<&String> = before_keys.difference(&after_keys).collect();
     assert!(
         lost.is_empty(),
         "{name}: a read→write cycle silently dropped {} key(s), reporting success:\n  {}",
@@ -162,6 +232,27 @@ fn assert_round_trip_preserves_keys(name: &str) {
             .map(|k| k.as_str())
             .collect::<Vec<_>>()
             .join("\n  ")
+    );
+
+    let invented: Vec<&String> = after_keys.difference(&before_keys).collect();
+    assert!(
+        invented.is_empty(),
+        "{name}: a read→write cycle invented {} key(s) that the file never carried:\n  {}",
+        invented.len(),
+        invented
+            .iter()
+            .map(|k| k.as_str())
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+
+    let mut changed = Vec::new();
+    diff_values(&before, &written, "", &mut changed);
+    assert!(
+        changed.is_empty(),
+        "{name}: a read→write cycle preserved every key but altered {} value(s):\n  {}",
+        changed.len(),
+        changed.join("\n  ")
     );
 
     assert_valid(&written, &format!("{name} after a read→write cycle"));
@@ -257,17 +348,17 @@ fn minimal_recording_opens() {
 
 /// A recording declaring `core:extensions` opens, and its declaration survives.
 ///
-/// **This test is green today, and its job is to stay green.** It is the guard
-/// against the tempting one-word "fix" to the `core:extensions`/`core:collection`
-/// rename collision: correcting the rename *without* also correcting the field's
-/// type makes this exact file stop opening, because a spec-shaped extensions array
-/// cannot deserialize into an `Option<String>`. Today the mismatched key falls
-/// through to the `other` catch-all and is preserved verbatim; the rename alone
-/// would trade that for a hard failure. If this test ever goes red, the change that
-/// did it is a regression, not a fix.
+/// **This test's job is to stay green**, and it is the reason the fix to the
+/// `core:extensions`/`core:collection` rename collision had to correct the field's
+/// *type* in the same change as its *name*. Correcting the rename alone would make
+/// this exact file stop opening, because a spec-shaped extensions array cannot
+/// deserialize into the `Option<String>` the field then had — so the one-word fix
+/// turns a red test green and this green test red, and only running both tells you
+/// which happened. If this test ever goes red, the change that did it is a
+/// regression, not a fix.
 #[test]
 fn declared_extensions_recording_opens_and_survives_a_round_trip() {
-    assert_round_trip_preserves_keys("extensions.sigmf-meta");
+    assert_round_trip_is_lossless("extensions.sigmf-meta");
 
     let written = round_trip("extensions.sigmf-meta");
     let declared = written["global"]["core:extensions"]
@@ -282,42 +373,44 @@ fn declared_extensions_recording_opens_and_survives_a_round_trip() {
 
 #[test]
 fn collection_recording_opens_and_survives_a_round_trip() {
-    assert_round_trip_preserves_keys("collection.sigmf-meta");
+    assert_round_trip_is_lossless("collection.sigmf-meta");
 }
 
 #[test]
 fn sample_recording_survives_a_round_trip() {
-    assert_round_trip_preserves_keys("sample.sigmf-meta");
+    assert_round_trip_is_lossless("sample.sigmf-meta");
 }
 
 #[test]
 fn minimal_recording_survives_a_round_trip() {
-    assert_round_trip_preserves_keys("minimal.sigmf-meta");
+    assert_round_trip_is_lossless("minimal.sigmf-meta");
 }
 
-/// A recording with a `core:geolocation` cannot be opened at all.
+/// A recording carrying a `core:geolocation` opens.
 ///
-/// `core:geolocation` is typed `Option<String>` where the schema says GeoJSON
-/// Point object. Unlike the extensions collision, nothing rescues this: a typed
-/// field whose shape mismatches is a hard deserialize error, so the whole file is
-/// rejected. `core:geolocation` is one of the most commonly populated optional
-/// fields in real recordings, which means anyone who pointed this crate at a
-/// real-world file hit this immediately.
+/// It could not until the field was typed. `core:geolocation` was an
+/// `Option<String>` where the schema says GeoJSON Point object, and unlike the
+/// extensions collision nothing rescued it: a typed field whose shape mismatches
+/// is a hard deserialize error, so the whole file was rejected. This is one of the
+/// most commonly populated optional fields in real recordings, so anyone who
+/// pointed the crate at a real-world file hit it immediately.
 #[test]
 fn global_geolocation_recording_opens() {
     let sigmf = SigMF::from_file(fixture_path("global_geolocation.sigmf-meta"))
         .expect("a recording carrying a global core:geolocation must open");
     assert_eq!(sigmf.metadata.captures.len(), 1);
-    assert_round_trip_preserves_keys("global_geolocation.sigmf-meta");
+    assert_round_trip_is_lossless("global_geolocation.sigmf-meta");
 }
 
-/// The schema states the Captures scope is the *preferred* home for
-/// `core:geolocation`. The crate has no such field, and `CaptureMetadata` has no
-/// catch-all either, so the preferred spelling of the most common optional field
-/// is read, discarded, and reported as success.
+/// The Captures scope is the schema's *preferred* home for `core:geolocation`, and
+/// a position written there survives intact.
+///
+/// The crate once had no such field and no capture-scope catch-all behind it
+/// either, so the preferred spelling of the most common optional field was read,
+/// discarded, and reported as success.
 #[test]
 fn capture_scope_geolocation_survives_a_round_trip() {
-    assert_round_trip_preserves_keys("capture_geolocation.sigmf-meta");
+    assert_round_trip_is_lossless("capture_geolocation.sigmf-meta");
 
     let written = round_trip("capture_geolocation.sigmf-meta");
     assert_eq!(
@@ -382,7 +475,7 @@ fn a_realistic_recording_opens_with_every_typed_field_populated() {
         })
     );
 
-    assert_round_trip_preserves_keys("realistic_recording.sigmf-meta");
+    assert_round_trip_is_lossless("realistic_recording.sigmf-meta");
 }
 
 /// A geolocation's GeoJSON Foreign Members survive a round-trip.
@@ -399,7 +492,7 @@ fn a_realistic_recording_opens_with_every_typed_field_populated() {
 /// if you write it from the schema's `properties` list and stop there.
 #[test]
 fn geolocation_foreign_members_survive_a_round_trip() {
-    assert_round_trip_preserves_keys("geolocation_foreign_members.sigmf-meta");
+    assert_round_trip_is_lossless("geolocation_foreign_members.sigmf-meta");
 
     let written = round_trip("geolocation_foreign_members.sigmf-meta");
     let geolocation = &written["captures"][0]["core:geolocation"];
@@ -411,20 +504,23 @@ fn geolocation_foreign_members_survive_a_round_trip() {
     );
 }
 
-/// `core:collection` lands in the wrong typed field.
+/// `core:collection` lands in the `collection` field.
 ///
-/// Two fields carry the same `#[serde(rename = "core:collection")]`: `extensions`
-/// and `collection`. serde binds the first, so a file's `core:collection` value
-/// arrives in `extensions`, and `collection` is unreachable — permanently `None`.
-/// Nothing warns: rustc and clippy are both silent, because serde's derive expands
-/// the field-name match into generated code the `unreachable_patterns` lint never
-/// sees. A round-trip test passes with this bug present, because the value
-/// serializes back out under the same (wrong) name.
+/// It once landed in `extensions`, because both fields carried the same
+/// `#[serde(rename = "core:collection")]` and serde binds the first — leaving
+/// `collection` unreachable and permanently `None`. Nothing warned: rustc and
+/// clippy were both silent, because serde's derive expands the field-name match
+/// into generated code the `unreachable_patterns` lint never saw.
 ///
-/// This one is not hygiene. `core:collection` is the field that associates a
-/// Recording with a `.sigmf-collection`, and the schema recommends Collections
-/// over `core:num_channels` for multi-channel IQ — which is exactly the shape a
-/// six-band receiver needs.
+/// This test asserts against the *typed field* rather than a round trip, and that
+/// is deliberate: a round trip passed with the bug present, because the value
+/// serialized back out under the same wrong name. Fidelity tests cannot see a
+/// value that is merely in the wrong place.
+///
+/// The field is worth this care. `core:collection` associates a Recording with a
+/// `.sigmf-collection`, and the schema recommends Collections over
+/// `core:num_channels` for multi-channel IQ — exactly the shape a six-band
+/// receiver needs.
 #[test]
 fn collection_field_binds_the_core_collection_key() {
     let sigmf = SigMF::from_file(fixture_path("collection.sigmf-meta")).expect("must open");
@@ -435,20 +531,19 @@ fn collection_field_binds_the_core_collection_key() {
     );
 }
 
-/// Capture-scope and annotation-scope keys are silently discarded.
+/// Capture-scope and annotation-scope keys survive a round trip.
 ///
-/// `GlobalMetadata` has a `#[serde(flatten)] other` catch-all. `CaptureMetadata`
-/// and `AnnotationMetadata` do not, so every key they do not model is dropped on
-/// read and absent on write — while the write reports success.
+/// `CaptureMetadata` and `AnnotationMetadata` once had no `#[serde(flatten)]`
+/// catch-all where `GlobalMetadata` had one, so every key they did not model was
+/// dropped on read and absent on write — while the write reported success.
 ///
-/// This is the one defect on the list that is a data-integrity bug rather than a
-/// conformance bug. A reader that cannot see a field is inconvenient. A writer
-/// that deletes a field it could not see, and tells you it succeeded, is
+/// That was a data-integrity bug rather than a conformance bug, and the distinction
+/// is worth keeping in view. A reader that cannot see a field is inconvenient. A
+/// writer that deletes a field it could not see, and tells you it succeeded, is
 /// something else.
 #[test]
-#[ignore = "known-red: CaptureMetadata and AnnotationMetadata have no #[serde(flatten)] catch-all; clears when they gain one"]
 fn scoped_extension_keys_survive_a_round_trip() {
-    assert_round_trip_preserves_keys("scoped_extension_keys.sigmf-meta");
+    assert_round_trip_is_lossless("scoped_extension_keys.sigmf-meta");
 
     let written = round_trip("scoped_extension_keys.sigmf-meta");
     assert_eq!(
@@ -461,14 +556,14 @@ fn scoped_extension_keys_survive_a_round_trip() {
     );
 }
 
-/// Writing extension data must also declare the extension.
+/// Writing extension data also declares the extension.
 ///
-/// The schema is explicit that `core:extensions` is how a reader learns it needs
-/// to support a namespace before parsing. `set_extension` writes `antenna:model`
-/// and never touches the declaration, so the crate emits files that *use* an
-/// extension without *declaring* it. The declared-extensions list and the
-/// extension accessors are entirely unconnected code — which is plausibly why
-/// nobody noticed the field was dead: nothing in the crate ever reads it.
+/// The schema is explicit that `core:extensions` is how a reader learns it must
+/// support a namespace before parsing. `set_extension` used to write
+/// `antenna:model` and never touch the declaration, so the crate emitted files
+/// that *used* an extension without *declaring* it. The declared-extensions list
+/// and the extension accessors were entirely unconnected code — which is plausibly
+/// why nobody noticed the field was dead: nothing in the crate ever read it.
 #[test]
 fn set_extension_declares_the_extension_it_writes() {
     let mut sigmf = SigMF::from_file(fixture_path("minimal.sigmf-meta")).expect("must open");
