@@ -1,31 +1,110 @@
-# Signal Metadata Format (SigMF) in Rust
+# sigmf
 
-The [SigMF specification document](https://github.com/sigmf/SigMF/blob/HEAD/sigmf-spec.md).
+[![crates.io](https://img.shields.io/crates/v/sigmf.svg)](https://crates.io/crates/sigmf)
+[![docs.rs](https://docs.rs/sigmf/badge.svg)](https://docs.rs/sigmf)
+
+Read and write [SigMF](https://sigmf.org) recordings in Rust: recorded radio
+signals, and the metadata that describes them.
+
+A SigMF **Recording** is two files sharing a basename. `foo.sigmf-data` holds raw
+interleaved samples and nothing else — no header, no framing. `foo.sigmf-meta` is a
+JSON sidecar saying what those bytes are: sample format, sample rate, centre
+frequency, when they were recorded. The point of the format is that the numbers you
+need to interpret the bytes travel *with* the bytes, instead of living in a README
+or someone's memory.
+
+## Example
+
+```rust,no_run
+use sigmf::num_complex::Complex;
+use sigmf::{GlobalMetadata, Metadata, SigMF};
+
+// A datatype is required to build a Global, but `to_file` derives the real one
+// from the samples and overwrites this — see below.
+let mut recording = SigMF::new(Metadata {
+    global: GlobalMetadata::new("cf32_le".parse()?),
+    captures: vec![],
+    annotations: vec![],
+});
+recording.metadata.global.sample_rate = Some(32_000.0);
+recording.metadata.global.recorder = Some("winradio-agent".to_string());
+
+// Writes dsc_watch.sigmf-data and dsc_watch.sigmf-meta.
+let samples = vec![Complex::new(1.0f32, 0.0), Complex::new(0.0, -1.0)];
+recording.to_file("dsc_watch", &samples)?;
+
+// And back again. The turbofish is checked against `core:datatype`, not assumed.
+let reopened = SigMF::from_file("dsc_watch.sigmf-meta")?;
+assert_eq!(reopened.samples::<Complex<f32>>()?, samples);
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+## `core:datatype` is a claim about the bytes
+
+`core:datatype` says how to read every byte of the Dataset. Get it wrong and nothing
+errors: `cf32_le` bytes read as `ci16_le` produce plausible noise at the wrong scale,
+and a waterfall of plausible noise looks exactly like a waterfall.
+
+So the write path does not accept the claim — it *derives* it. `to_file` is generic
+over the sample type, sets `core:datatype` from it, and overwrites whatever the
+Global held. The field and the bytes cannot disagree, because only one of them is an
+input. Reading works the same way in reverse: `samples::<S>()` errors rather than
+reinterpret.
+
+What the crate cannot defend is a `Metadata` you fill in and serialize yourself.
+`to_file` cannot lie; `serde_json::to_string` on a Global will happily write whatever
+you put in it.
+
+## Specification
+
+This crate implements SigMF **v1.2.6**.
+
+The specification is published at [sigmf.org](https://sigmf.org). There is no spec
+document to read in the upstream repository any more — it is *generated*, by
+[`docs-generator.py`](https://github.com/sigmf/SigMF/blob/main/docs-generator.py),
+from [`sigmf-schema.json`](https://github.com/sigmf/SigMF/blob/main/sigmf-schema.json).
+The schema is therefore the specification rather than a description of one.
+
+This crate vendors that schema at `tests/spec/sigmf-schema.json` and uses it as a
+test oracle rather than as documentation: fixtures are validated against it before
+they are trusted to judge the crate, and metadata the crate writes is validated
+against it on the way out.
 
 ## Roadmap
 
-### PoC
-
-#### SigMF Metadata
+### Metadata
 
 - [x] parse all core fields in metadata
-- [ ] support GeoJSON parsing
-- [ ] support datetime parsing
-- [ ] optional checksum validation
-- [ ] reading samples from data file
-- [ ] reading multiple channels
-- [ ] automatic searching accompanying files (e.g., open data file if metadata is provided)
-- [ ] add documentation and doc tests
+- [x] support GeoJSON parsing, including RFC 7946 foreign members
+- [x] automatically find the accompanying Dataset, given the Metadata file
+- [x] support extensions, including declaring them in `core:extensions`
+- [x] documentation and doc-tests
+- [ ] support datetime parsing — `core:datetime` is still carried as an
+      unvalidated string, where the schema requires RFC 3339 with a `Z` offset
+- [ ] optional checksum validation — `core:sha512` is *written*, but nothing
+      verifies it on read
+- [ ] reading multiple channels — an interleaved multi-channel Dataset is
+      refused rather than deinterleaved
+
+### Samples
+
+- [x] write samples to a Dataset, deriving `core:datatype` from the sample type
+- [x] read samples from a Dataset, checked against `core:datatype`
+- [x] byte ranges of each Captures segment, without reading the samples
 
 ### Infra
 
-- [ ] run tests on CI
-- [ ] configure linters
-- [ ] add validation rules to PR
-- [ ] configure publishing to crates
-- [ ] add license info
+- [x] run tests on CI
+- [x] configure linters
+- [x] add validation rules to PR
+- [x] configure publishing to crates
+- [x] add license info
 
 ### Later
 
-- [ ] SigMF Archive reading
-- [ ] support extensions
+- [ ] SigMF Archive (`.sigmf`) reading
+- [ ] SigMF Collections (`.sigmf-collection`)
+
+## License
+
+MIT — see [LICENSE](LICENSE).

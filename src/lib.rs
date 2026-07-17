@@ -1,9 +1,91 @@
+//! Read and write [SigMF](https://sigmf.org) recordings: recorded radio signals, and
+//! the metadata that describes them.
+//!
+//! A **Recording** is two files sharing a basename. `foo.sigmf-data` holds raw
+//! interleaved samples and nothing else — no header, no framing. `foo.sigmf-meta` is
+//! a JSON sidecar saying what those bytes are: sample format, sample rate, centre
+//! frequency, when they were recorded. The point of the format is that the numbers
+//! needed to interpret the bytes travel *with* the bytes, instead of living in a
+//! README or someone's memory.
+//!
+//! Start at [`SigMF`]. [`SigMF::to_file`] writes both files of a Recording,
+//! [`SigMF::from_file`] opens one, and [`SigMF::samples`] decodes the Dataset.
+//! [`Metadata`] is the document itself, should you want to build or inspect one
+//! without touching a disk.
+//!
+//! # Examples
+//!
+//! Write a Recording and read it back:
+//!
+//! ```
+//! use sigmf::num_complex::Complex;
+//! use sigmf::{GlobalMetadata, Metadata, SigMF};
+//! # let dir = tempfile::tempdir().expect("a temporary directory");
+//! # let basename = dir.path().join("dsc_watch");
+//!
+//! let mut recording = SigMF::new(Metadata {
+//!     global: GlobalMetadata::new("cf32_le".parse().expect("a valid datatype")),
+//!     captures: vec![],
+//!     annotations: vec![],
+//! });
+//! recording.metadata.global.sample_rate = Some(32_000.0);
+//! recording.metadata.global.recorder = Some("winradio-agent".to_string());
+//!
+//! // Writes `dsc_watch.sigmf-data` and `dsc_watch.sigmf-meta`.
+//! let samples = vec![Complex::new(1.0f32, 0.0), Complex::new(0.0, -1.0)];
+//! recording.to_file(&basename, &samples)?;
+//!
+//! let reopened = SigMF::from_file(dir.path().join("dsc_watch.sigmf-meta"))?;
+//! assert_eq!(reopened.metadata.global.sample_rate, Some(32_000.0));
+//! assert_eq!(reopened.samples::<Complex<f32>>()?, samples);
+//! # Ok::<(), sigmf::Error>(())
+//! ```
+//!
+//! # `core:datatype` is a claim about the bytes
+//!
+//! `core:datatype` says how to read every byte of the Dataset, and a Dataset is
+//! nothing but bytes. Get the field wrong and nothing errors — `cf32_le` bytes read
+//! as `ci16_le` yield plausible noise at the wrong scale, and a waterfall of
+//! plausible noise looks exactly like a waterfall.
+//!
+//! So this crate does not accept the claim, it *derives* it. [`SigMF::to_file`] is
+//! generic over the sample type, sets `core:datatype` from that type, and overwrites
+//! whatever the [`GlobalMetadata`] held: the field and the bytes cannot disagree,
+//! because only one of them is an input. [`SigMF::samples`] enforces the same
+//! equation from the other side, erroring rather than reinterpreting.
+//!
+//! What the crate cannot defend is a [`Metadata`] you fill in and serialize yourself.
+//! `to_file` cannot lie; [`Metadata::to_json`] will write whatever you put in it.
+//!
+//! # The specification is the schema
+//!
+//! This crate implements SigMF **v1.2.6** ([`SIGMF_VERSION`]). The specification is
+//! published at [sigmf.org](https://sigmf.org), but there is no specification
+//! document in the upstream repository to read: it is *generated* from
+//! [`sigmf-schema.json`](https://github.com/sigmf/SigMF/blob/main/sigmf-schema.json),
+//! which makes the schema the specification rather than a description of one. This
+//! crate vendors it and uses it as a test oracle, validating against it both the
+//! fixtures it is judged by and the metadata it writes.
+
 // A library that parses documents from anywhere and indexes into buffers by
 // offsets those documents chose is exactly the kind that should not be able to
 // reach for `unsafe` -- and this one has never needed it. `forbid` rather than
 // `deny` so that the guarantee cannot be turned off locally by the module that
 // most wants to.
 #![forbid(unsafe_code)]
+// This crate's conventions have required documentation on every public item since
+// before it was published, and nothing enforced it, so the surface it inherited went
+// undocumented while each new change documented itself. `cargo doc` could not help:
+// it warns about broken links in the docs that exist and says nothing at all about
+// the docs that do not, so a crate with no documentation whatsoever builds clean.
+#![deny(missing_docs)]
+
+// Compiles the README's example as a doc-test, so an API change that outdates the
+// landing page turns the build red rather than shipping. `cfg(doctest)` keeps it out
+// of the rendered docs, where it would only duplicate the crate docs above.
+#[cfg(doctest)]
+#[doc = include_str!("../README.md")]
+struct ReadmeDoctests;
 
 /// The complex-number type this crate's sample vocabulary is built on.
 ///
@@ -66,10 +148,28 @@ mod sigmf {
     /// asserted against it by the test suite so the two cannot drift apart.
     pub const SIGMF_VERSION: &str = "1.2.6";
 
+    /// A Recording: a [`Metadata`] document, and the Dataset it describes.
+    ///
+    /// The Dataset is referred to by path and read only on demand, so this is cheap
+    /// to hold regardless of how many samples it names. [`from_file`](Self::from_file)
+    /// opens an existing Recording, [`new`](Self::new) starts one that does not exist
+    /// yet, and [`to_file`](Self::to_file) writes both of its files.
     #[derive(Debug)]
     pub struct SigMF {
+        /// The document describing the Dataset.
+        ///
+        /// Public because it is the whole point: reading `core:sample_rate` off a
+        /// Recording, or setting `core:recorder` before writing one, is what callers
+        /// come here to do. Note that [`to_file`](Self::to_file) *overwrites*
+        /// `global.datatype` and `global.sha512` from the samples it is given, so
+        /// setting either by hand accomplishes nothing.
         pub metadata: Metadata,
-        // captures: Vec<CaptureMetadata>,
+
+        /// The Dataset this Recording's samples live in, if it has one.
+        ///
+        /// `None` for a `core:metadata_only` Recording, for a Metadata file whose
+        /// name does not yield a sibling, and for one [`new`](Self::new) has built
+        /// but nothing has yet written.
         datafile: Option<PathBuf>,
     }
 
@@ -144,6 +244,38 @@ mod sigmf {
         /// [`MetadataError::NoDataset`] if there is no Dataset to read,
         /// [`MetadataError::PartialSample`] if a segment's bytes are not a whole
         /// number of samples, or [`Error::Io`].
+        ///
+        /// # Examples
+        ///
+        /// Asking for the wrong type is refused, not reinterpreted. Eight `cf32_le`
+        /// bytes are also two perfectly good `ci16_le` samples, and that is exactly
+        /// the reading this rules out:
+        ///
+        /// ```
+        /// use sigmf::num_complex::Complex;
+        /// use sigmf::{Error, GlobalMetadata, Metadata, MetadataError, SigMF};
+        /// # let dir = tempfile::tempdir().expect("a temporary directory");
+        /// # let basename = dir.path().join("capture");
+        ///
+        /// let mut recording = SigMF::new(Metadata {
+        ///     global: GlobalMetadata::new("cf32_le".parse().expect("a valid datatype")),
+        ///     captures: vec![],
+        ///     annotations: vec![],
+        /// });
+        /// recording.to_file(&basename, &[Complex::new(1.0f32, 0.0)])?;
+        ///
+        /// let reopened = SigMF::from_file(dir.path().join("capture.sigmf-meta"))?;
+        /// assert_eq!(reopened.samples::<Complex<f32>>()?, [Complex::new(1.0f32, 0.0)]);
+        ///
+        /// let err = reopened
+        ///     .samples::<Complex<i16>>()
+        ///     .expect_err("the Dataset is cf32_le, and says so");
+        /// assert!(matches!(
+        ///     err,
+        ///     Error::Metadata(MetadataError::DatatypeMismatch { .. })
+        /// ));
+        /// # Ok::<(), sigmf::Error>(())
+        /// ```
         pub fn samples<S: Sample>(&self) -> Result<Vec<S>, Error> {
             let datatype = self.metadata.global.datatype;
 
@@ -210,6 +342,38 @@ mod sigmf {
         ///
         /// See [`to_file_with`](Self::to_file_with), which this defers to, for what
         /// gets written and what gets overwritten.
+        ///
+        /// # Examples
+        ///
+        /// A Global's `core:datatype` is a claim, and writing settles it. Here the
+        /// claim is wrong, and the file describes its own bytes anyway:
+        ///
+        /// ```
+        /// use sigmf::num_complex::Complex;
+        /// use sigmf::{GlobalMetadata, Metadata, SigMF};
+        /// # let dir = tempfile::tempdir().expect("a temporary directory");
+        /// # let basename = dir.path().join("capture");
+        ///
+        /// // A Global claiming 16-bit real samples ...
+        /// let mut recording = SigMF::new(Metadata {
+        ///     global: GlobalMetadata::new("ri16_le".parse().expect("a valid datatype")),
+        ///     captures: vec![],
+        ///     annotations: vec![],
+        /// });
+        ///
+        /// // ... handed complex 32-bit floats.
+        /// recording.to_file(&basename, &[Complex::new(1.0f32, 0.0)])?;
+        ///
+        /// // The samples win: `ri16_le` was never written anywhere.
+        /// assert_eq!(recording.metadata.global.datatype.to_string(), "cf32_le");
+        ///
+        /// // Eight bytes for the one sample, and a checksum over them.
+        /// let data = std::fs::metadata(dir.path().join("capture.sigmf-data"))
+        ///     .expect("the Dataset was written");
+        /// assert_eq!(data.len(), 8);
+        /// assert!(recording.metadata.global.sha512.is_some());
+        /// # Ok::<(), sigmf::Error>(())
+        /// ```
         pub fn to_file<S: Sample, P: AsRef<Path>>(
             &mut self,
             basename: P,
@@ -249,6 +413,41 @@ mod sigmf {
         /// Returns [`MetadataError::MultiChannelDataset`] if `core:num_channels` is
         /// set to anything but 1 (see the SigMF specification's advice to use
         /// Collections instead), or [`Error::Io`] if either file cannot be written.
+        ///
+        /// # Examples
+        ///
+        /// Writing big-endian and without a checksum. Note that turning the checksum
+        /// off *clears* `core:sha512`, so a Recording written twice cannot end up
+        /// carrying a hash of the Dataset it used to have:
+        ///
+        /// ```
+        /// use sigmf::num_complex::Complex;
+        /// use sigmf::{Endianness, GlobalMetadata, Metadata, SigMF, WriteOptions};
+        /// # let dir = tempfile::tempdir().expect("a temporary directory");
+        /// # let basename = dir.path().join("capture");
+        ///
+        /// let mut recording = SigMF::new(Metadata {
+        ///     global: GlobalMetadata::new("cf32_le".parse().expect("a valid datatype")),
+        ///     captures: vec![],
+        ///     annotations: vec![],
+        /// });
+        ///
+        /// recording.to_file(&basename, &[Complex::new(1.0f32, 0.0)])?;
+        /// assert!(recording.metadata.global.sha512.is_some(), "on by default");
+        ///
+        /// recording.to_file_with(
+        ///     &basename,
+        ///     &[Complex::new(1.0f32, 0.0)],
+        ///     WriteOptions::default()
+        ///         .endianness(Endianness::BigEndian)
+        ///         .checksum(false),
+        /// )?;
+        ///
+        /// // The byte order is not a preference the file keeps to itself.
+        /// assert_eq!(recording.metadata.global.datatype.to_string(), "cf32_be");
+        /// assert!(recording.metadata.global.sha512.is_none(), "cleared, not stale");
+        /// # Ok::<(), sigmf::Error>(())
+        /// ```
         pub fn to_file_with<S: Sample, P: AsRef<Path>>(
             &mut self,
             basename: P,
@@ -437,10 +636,40 @@ mod sigmf {
         }
     }
 
+    /// A `.sigmf-meta` document: everything known about a Dataset except its bytes.
+    ///
+    /// The specification gives this three top-level scopes, and they answer different
+    /// questions. [`global`](Self::global) describes the Recording as a whole — what
+    /// the samples *are*. [`captures`](Self::captures) describes the Dataset in
+    /// segments, each taking effect at a sample index — what the receiver was *doing*
+    /// while it recorded them. [`annotations`](Self::annotations) describes things
+    /// found *in* the samples, at a sample index and optionally a frequency band.
+    ///
+    /// A Metadata can be manipulated without any Dataset present, which is what makes
+    /// [`from_json`](Self::from_json) and [`to_json`](Self::to_json) worth having
+    /// alongside [`SigMF`]. It is also the type that can lie: a Global's
+    /// `core:datatype` is checked against reality only by [`SigMF::to_file`] and
+    /// [`SigMF::samples`], never by this type on its own.
     #[derive(Debug, Deserialize, Serialize)]
     pub struct Metadata {
+        /// What the samples are: format, rate, and provenance.
         pub global: GlobalMetadata,
+
+        /// The Dataset in segments, each taking effect at a sample index.
+        ///
+        /// A Recording that never retunes has one segment; one that hops has a
+        /// segment per hop. Ordering is the specification's, not this crate's: the
+        /// array SHOULD be sorted by `core:sample_start`, and
+        /// [`capture_boundaries`](Self::capture_boundaries) reads it in the order it
+        /// finds it.
         pub captures: Vec<CaptureMetadata>,
+
+        /// Features found in the samples, each at a sample index and optionally a
+        /// frequency band.
+        ///
+        /// Nothing in the format requires these to be present, correct, or produced
+        /// by whoever made the Recording — an annotation is somebody's claim about a
+        /// signal, and [`generator`](AnnotationMetadata::generator) records whose.
         pub annotations: Vec<AnnotationMetadata>,
     }
 
@@ -504,6 +733,27 @@ mod sigmf {
         /// [`MetadataError::CaptureOutOfBounds`] if a segment describes bytes the
         /// Dataset does not have, which includes the case of segments that are not
         /// sorted by `core:sample_start` as the specification requires.
+        ///
+        /// # Examples
+        ///
+        /// A Recording that retuned once, halfway through 32 bytes of `cf32_le` — so
+        /// four samples of eight bytes, two per segment:
+        ///
+        /// ```
+        /// use sigmf::Metadata;
+        ///
+        /// let metadata: Metadata = serde_json::from_str(r#"{
+        ///     "global": { "core:datatype": "cf32_le", "core:version": "1.2.6" },
+        ///     "captures": [
+        ///         { "core:sample_start": 0, "core:frequency": 2187500.0 },
+        ///         { "core:sample_start": 2, "core:frequency": 8414500.0 }
+        ///     ],
+        ///     "annotations": []
+        /// }"#)?;
+        ///
+        /// assert_eq!(metadata.capture_boundaries(32)?, [0..16, 16..32]);
+        /// # Ok::<(), Box<dyn std::error::Error>>(())
+        /// ```
         pub fn capture_boundaries(
             &self,
             dataset_len: u64,
@@ -571,54 +821,117 @@ mod sigmf {
         }
     }
 
+    /// The `global` scope: what the samples are, and where they came from.
+    ///
+    /// Only [`datatype`](Self::datatype) and [`version`](Self::version) are required,
+    /// which is why [`new`](Self::new) takes one argument and supplies the other.
+    /// Everything else is optional in the specification and so `Option` here, with
+    /// one exception: [`other`](Self::other) is the catch-all that makes this type
+    /// lossless, because the schema does not close this object and extension
+    /// namespaces live in it.
     #[derive(Debug, PartialEq, Deserialize, Serialize)]
     pub struct GlobalMetadata {
+        /// How to read every byte of the Dataset.
+        ///
+        /// **Do not set this to describe samples you are about to write.**
+        /// [`SigMF::to_file`] derives it from the sample type and overwrites this;
+        /// the crate-level docs explain why that is not a courtesy but the crate's
+        /// central guarantee. Setting it matters only for a Recording you are
+        /// serializing by hand, which is the one case nothing can check.
         #[serde(rename = "core:datatype")]
         pub datatype: DataFormat,
 
+        /// Samples per second, in Hz.
+        ///
+        /// Optional in the specification, and a Recording without it is very nearly
+        /// useless — nothing downstream can convert a sample index to a time, or a
+        /// bin to a frequency. Set it.
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "core:sample_rate")]
         pub sample_rate: Option<f64>,
 
+        /// The version of the SigMF specification this document is written to, as
+        /// `X.Y.Z`.
+        ///
+        /// [`new`](Self::new) sets it to [`SIGMF_VERSION`]. Reading a Recording does
+        /// not check it: this crate parses what it understands and preserves the rest
+        /// through [`other`](Self::other), which degrades more gracefully than
+        /// refusing a document over a version number.
         #[serde(rename = "core:version")]
         pub version: String,
 
+        /// The number of channels interleaved into the Dataset.
+        ///
+        /// Absent means 1. Anything other than 1 is refused by both
+        /// [`SigMF::to_file`] and [`SigMF::samples`], which deal in a flat `[S]` that
+        /// cannot say which channel a sample belongs to — the specification's own
+        /// advice is to use a Collection rather than this field.
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "core:num_channels")]
         pub num_channels: Option<u64>,
 
+        /// SHA-512 of the Dataset file, lowercase hex.
+        ///
+        /// [`SigMF::to_file`] computes and overwrites this, or clears it when
+        /// [`WriteOptions::checksum`] is off — a stale hash describing a Dataset that
+        /// no longer exists is worse than no hash. Nothing in this crate verifies it
+        /// on read.
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "core:sha512")]
         pub sha512: Option<String>,
 
+        /// The sample index of the Dataset's first sample.
+        ///
+        /// Absent means 0. Non-zero says this Recording is one piece of a stream
+        /// split across files: sample indices in SigMF are absolute, so every other
+        /// index in this document should be at or above it.
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "core:offset")]
         pub offset: Option<u64>,
 
+        /// A human-readable description of the Recording.
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "core:description")]
         pub description: Option<String>,
 
+        /// Who made the Recording — free text, and the specification suggests it may
+        /// include a name, handle, email, or callsign.
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "core:author")]
         pub author: Option<String>,
 
+        /// The DOI (ISO 26324) registered for this Metadata file.
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "core:meta_doi")]
         pub meta_doi: Option<String>,
 
+        /// The DOI (ISO 26324) registered for this Recording's Dataset file.
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "core:data_doi")]
         pub data_doi: Option<String>,
 
+        /// The software that made this Recording.
+        ///
+        /// The counterpart to [`hw`](Self::hw), and the field that answers "what
+        /// wrote this?" six months later. Note that it names the *recorder*, not this
+        /// crate — nothing here fills it in for you.
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "core:recorder")]
         pub recorder: Option<String>,
 
+        /// A URL (RFC 3986) for the license the Recording is offered under.
+        ///
+        /// A URL, not an SPDX identifier or licence text — a bare `MIT` here is not
+        /// what the specification asks for.
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "core:license")]
         pub license: Option<String>,
 
+        /// A human-readable description of the hardware used to make the Recording.
+        ///
+        /// Free text: receiver, antenna, preamp, whatever the next person needs to
+        /// interpret what they are looking at. Structured antenna facts have a
+        /// dedicated home in the `antenna` extension — see [`AntennaGlobal`].
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "core:hw")]
         pub hw: Option<String>,
@@ -648,14 +961,33 @@ mod sigmf {
         #[serde(rename = "core:collection")]
         pub collection: Option<String>,
 
+        /// `true` if this Metadata is distributed deliberately without its Dataset.
+        ///
+        /// Makes [`SigMF::samples`] and [`SigMF::capture_boundaries`] fail with
+        /// [`MetadataError::NoDataset`], which is the point: there is nothing to
+        /// read, and the document says so rather than leaving a reader to discover a
+        /// missing file.
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "core:metadata_only")]
         pub metadata_only: Option<bool>,
 
+        /// The filename of a Non-Conforming Dataset, extension included.
+        ///
+        /// Present only for a Recording whose samples live in a file this format did
+        /// not produce — a `.wav`, a vendor capture — which is what "Non-Conforming"
+        /// means. It names a file beside the Metadata file; a path with a directory
+        /// component in it is refused by [`SigMF::from_file`]. Absent, the Dataset is
+        /// the sibling `<basename>.sigmf-data`.
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "core:dataset")]
         pub dataset: Option<String>,
 
+        /// Bytes to ignore at the *end* of a Non-Conforming Dataset.
+        ///
+        /// The footer of a container this format did not write.
+        /// [`Metadata::capture_boundaries`] subtracts these, and errors if there are
+        /// more of them than the Dataset has bytes. Its counterpart at the other end
+        /// is per-segment: [`CaptureMetadata::header_bytes`].
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "core:trailing_bytes")]
         pub trailing_bytes: Option<u64>,
@@ -669,19 +1001,48 @@ mod sigmf {
         pub other: Map<String, Value>,
     }
 
+    /// One Captures segment: what the receiver was doing, from a sample index on.
+    ///
+    /// A segment takes effect at [`sample_start`](Self::sample_start) and runs until
+    /// the next one begins, or to the end of the Dataset. A Recording that sits on
+    /// one frequency has a single segment; one that retunes or hops has a segment per
+    /// change, and that is how a reader learns the centre frequency of any given
+    /// sample. [`Metadata::capture_boundaries`] turns the array into byte ranges.
     #[derive(Debug, PartialEq, Deserialize, Serialize)]
     pub struct CaptureMetadata {
+        /// The sample index at which this segment takes effect.
+        ///
+        /// Absolute, and so measured from [`GlobalMetadata::offset`] rather than from
+        /// the start of this Dataset — the two differ for a stream split across
+        /// files.
         #[serde(rename = "core:sample_start")]
         pub sample_start: u64,
 
+        /// The index of [`sample_start`](Self::sample_start) in the original stream,
+        /// if the Dataset holds only part of one.
+        ///
+        /// Absent means it is the same as `sample_start`. Present, it says samples
+        /// were dropped or never captured before this point — a gap this Recording
+        /// cannot otherwise express.
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "core:global_index")]
         pub global_index: Option<u64>,
 
+        /// The centre frequency of the signal in this segment, in Hz.
+        ///
+        /// What the samples are centred *on*, not what is in them: baseband DC in the
+        /// Dataset is this frequency on the air.
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "core:frequency")]
         pub frequency: Option<f64>,
 
+        /// When [`sample_start`](Self::sample_start) was recorded.
+        ///
+        /// The specification requires an RFC 3339 timestamp whose only permitted
+        /// offset is `Z` — so `2026-07-17T09:33:00Z`, and not a local time with an
+        /// offset. This crate carries the field as an unvalidated `String` and
+        /// enforces none of that: it neither parses what it reads nor checks what it
+        /// writes, so a value here is only as well-formed as whoever set it.
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "core:datetime")]
         pub datetime: Option<String>,
@@ -695,6 +1056,12 @@ mod sigmf {
         #[serde(rename = "core:geolocation")]
         pub geolocation: Option<Geolocation>,
 
+        /// Bytes to skip at the start of this segment, for a Non-Conforming Dataset.
+        ///
+        /// The header of a container this format did not write, sitting physically
+        /// where this segment's samples would otherwise begin.
+        /// [`Metadata::capture_boundaries`] skips them. Its counterpart at the other
+        /// end of the file is [`GlobalMetadata::trailing_bytes`].
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "core:header_bytes")]
         pub header_bytes: Option<u64>,
@@ -711,35 +1078,71 @@ mod sigmf {
         pub other: Map<String, Value>,
     }
 
+    /// One annotation: something somebody claims is in the samples.
+    ///
+    /// An annotation marks a feature in a region of the Recording — a burst, a
+    /// carrier, a decoded message — bounded in time by
+    /// [`sample_start`](Self::sample_start) and [`sample_count`](Self::sample_count),
+    /// and optionally in frequency by the two edge fields.
+    ///
+    /// Nothing here is authoritative. Annotations may be added by anyone at any time,
+    /// need not agree with each other, and are not checked against the samples by
+    /// this crate or by the format; [`generator`](Self::generator) exists precisely
+    /// because a claim is worth only as much as its source.
     #[derive(Debug, PartialEq, Deserialize, Serialize)]
     pub struct AnnotationMetadata {
+        /// The sample index where the annotated feature begins.
         #[serde(rename = "core:sample_start")]
         pub sample_start: u64,
 
+        /// How many samples the feature covers.
+        ///
+        /// Absent means the annotation applies from `sample_start` to the end of the
+        /// Recording.
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "core:sample_count")]
         pub sample_count: Option<u64>,
 
+        /// The lower edge of the annotated band, in Hz.
+        ///
+        /// The specification asks for RF rather than baseband where the RF frequency
+        /// is known — so an absolute frequency on the air, not an offset from the
+        /// segment's [`CaptureMetadata::frequency`]. Paired with
+        /// [`freq_upper_edge`](Self::freq_upper_edge): the schema requires either
+        /// both or neither.
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "core:freq_lower_edge")]
         pub freq_lower_edge: Option<f64>,
 
+        /// The upper edge of the annotated band, in Hz. See
+        /// [`freq_lower_edge`](Self::freq_lower_edge).
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "core:freq_upper_edge")]
         pub freq_upper_edge: Option<f64>,
 
+        /// A short label for the feature, for a human or a machine.
+        ///
+        /// The specification recommends keeping it under about 20 characters, since
+        /// a common use is a caption on a spectrogram. Longer prose belongs in
+        /// [`comment`](Self::comment).
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "core:label")]
         pub label: Option<String>,
 
+        /// What produced this annotation — a person, a detector, a decoder.
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "core:generator")]
         pub generator: Option<String>,
 
+        /// A longer human-readable comment. See [`label`](Self::label) for the short
+        /// form.
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "core:comment")]
         pub comment: Option<String>,
 
+        /// An RFC 4122 UUID for this annotation.
+        ///
+        /// Carried as an unvalidated `String`; this crate does not check the form.
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "core:uuid")]
         pub uuid: Option<String>,
@@ -967,63 +1370,106 @@ mod sigmf {
         }
     }
 
+    /// The `antenna` extension's Global fields: what was on the end of the coax.
+    ///
+    /// The one extension this crate ships a type for, and the reference example of
+    /// [`GlobalExtension`]. Write it with [`GlobalMetadata::set_extension`], which
+    /// also declares the namespace in `core:extensions`; read it back with
+    /// [`GlobalMetadata::get_extension`].
+    ///
+    /// Only [`model`](Self::model) is required by the extension's schema, so
+    /// [`Default`] plus struct update syntax is the intended way to build one.
     #[derive(Debug, PartialEq, Deserialize, Serialize)]
     pub struct AntennaGlobal {
+        /// Make and model — the extension's only required field.
+        ///
+        /// A catalogue entry rather than a category: `ARA CSB-16`, `Wellbrook
+        /// ALA1530`. The category goes in [`antenna_type`](Self::antenna_type).
         #[serde(rename = "antenna:model")]
         pub model: String,
 
+        /// The kind of antenna: `dipole`, `biconical`, `monopole`, and so on.
+        ///
+        /// Named `antenna_type` rather than `type`, which is a Rust keyword; the wire
+        /// name is `antenna:type` regardless.
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "antenna:type")]
         pub antenna_type: Option<String>,
 
+        /// The low end of the antenna's operational range, in Hz.
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "antenna:low_frequency")]
         pub low_frequency: Option<f64>,
 
+        /// The high end of the antenna's operational range, in Hz.
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "antenna:high_frequency")]
         pub high_frequency: Option<f64>,
 
+        /// Gain in the direction of maximum radiation or reception, in dBi.
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "antenna:gain")]
         pub gain: Option<f64>,
 
+        /// Gain pattern in the horizontal plane, in dBi.
+        ///
+        /// The extension defines this as 0 to 359 degrees in 1-degree steps — so 360
+        /// values, by position rather than by any index carried in the data. Nothing
+        /// here enforces the length.
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "antenna:horizontal_gain_pattern")]
         pub horizontal_gain_pattern: Option<Vec<f64>>,
 
+        /// Gain pattern in the vertical plane, in dBi.
+        ///
+        /// Defined as -90 to +90 degrees in 1-degree steps — 181 values, positional,
+        /// and again unenforced.
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "antenna:vertical_gain_pattern")]
         pub vertical_gain_pattern: Option<Vec<f64>>,
 
+        /// Horizontal 3 dB beamwidth, in degrees.
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "antenna:horizontal_beam_width")]
         pub horizontal_beam_width: Option<f64>,
 
+        /// Vertical 3 dB beamwidth, in degrees.
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "antenna:vertical_beam_width")]
         pub vertical_beam_width: Option<f64>,
 
+        /// Cross-polarization discrimination.
+        ///
+        /// The extension's schema gives this no unit, unlike every other numeric
+        /// field here. Conventionally dB.
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "antenna:cross_polar_discrimination")]
         pub cross_polar_discrimination: Option<f64>,
 
+        /// Voltage standing wave ratio.
+        ///
+        /// The extension's schema says "in units of volts", which VSWR is not — it is
+        /// a dimensionless ratio. Recorded here as upstream states it.
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "antenna:voltage_standing_wave_ratio")]
         pub voltage_standing_wave_ratio: Option<f64>,
 
+        /// Loss of the cable between antenna and preselector, in dB.
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "antenna:cable_loss")]
         pub cable_loss: Option<f64>,
 
+        /// Whether the antenna can be steered.
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "antenna:steerable")]
         pub steerable: Option<bool>,
 
+        /// Whether the antenna is mobile.
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "antenna:mobile")]
         pub mobile: Option<bool>,
 
+        /// Height of the antenna's phase centre above ground level, in metres.
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "antenna:hagl")]
         pub hagl: Option<f64>,
