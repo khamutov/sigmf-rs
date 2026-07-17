@@ -17,23 +17,17 @@ or someone's memory.
 
 ```rust,no_run
 use sigmf::num_complex::Complex;
-use sigmf::Endianness::LittleEndian;
-use sigmf::{DataFormat, GlobalMetadata, Metadata, SigMF};
+use sigmf::{RecordingWriter, SigMF};
 
-// `core:datatype` is a function of the sample type, so ask for it by type rather
-// than spelling it. `to_file` derives it again from what you hand it, which is why
-// this is the one value it cannot contradict.
-let mut recording = SigMF::new(Metadata {
-    global: GlobalMetadata::new(DataFormat::of::<Complex<f32>>(LittleEndian)),
-    captures: vec![],
-    annotations: vec![],
-});
-recording.metadata.global.sample_rate = Some(32_000.0);
-recording.metadata.global.recorder = Some("winradio-agent".to_string());
+let samples = vec![Complex::new(1.0f32, 0.0), Complex::new(0.0, -1.0)];
+
+// The writer knows the sample type, so `core:datatype` is nobody's input.
+let mut writer = RecordingWriter::new(&samples);
+writer.global_mut().sample_rate = Some(32_000.0);
+writer.global_mut().recorder = Some("winradio-agent".to_string());
 
 // Writes dsc_watch.sigmf-data and dsc_watch.sigmf-meta.
-let samples = vec![Complex::new(1.0f32, 0.0), Complex::new(0.0, -1.0)];
-recording.to_file("dsc_watch", &samples)?;
+writer.to_file("dsc_watch")?;
 
 // And back again. The turbofish is checked against `core:datatype`, not assumed.
 let reopened = SigMF::from_file("dsc_watch.sigmf-meta")?;
@@ -47,15 +41,18 @@ assert_eq!(reopened.samples::<Complex<f32>>()?, samples);
 errors: `cf32_le` bytes read as `ci16_le` produce plausible noise at the wrong scale,
 and a waterfall of plausible noise looks exactly like a waterfall.
 
-So the write path does not accept the claim — it *derives* it. `to_file` is generic
-over the sample type, sets `core:datatype` from it, and overwrites whatever the
-Global held. The field and the bytes cannot disagree, because only one of them is an
-input. Reading works the same way in reverse: `samples::<S>()` errors rather than
-reinterpret.
+So the write path does not accept the claim — it *derives* it. Nothing in
+`RecordingWriter`'s surface asks for a datatype: it knows the sample type from the
+moment it is handed samples, sets `core:datatype` from that type, and overwrites
+whatever the Global held. The field and the bytes cannot disagree, because only one
+of them is an input. Reading works the same way in reverse: `samples::<S>()` errors
+rather than reinterpret.
 
-What the crate cannot defend is a `Metadata` you fill in and serialize yourself.
-`to_file` cannot lie; `serde_json::to_string` on a Global will happily write whatever
-you put in it.
+The one place a datatype is *stated* rather than derived is
+`GlobalMetadata::describing`, for bytes the crate never sees — a Dataset some other
+tool wrote, or a `core:metadata_only` document with no Dataset at all. There the
+author's word is all there is, and `serde_json::to_string` will happily write
+whatever they put in it.
 
 ## Specification
 

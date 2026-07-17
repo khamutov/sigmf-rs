@@ -309,12 +309,12 @@ fn the_version_the_crate_writes_is_the_version_it_is_tested_against() {
 /// The constructor replaced a `Default` impl that produced an empty `core:datatype`
 /// and an empty `core:version` — both required by the schema, so every recording
 /// built from it and then filled in was born invalid and stayed that way unless the
-/// caller happened to overwrite both. `GlobalMetadata::new` cannot do that: it takes
-/// a parsed datatype and supplies the version itself.
+/// caller happened to overwrite both. `GlobalMetadata::describing` cannot do that:
+/// it takes a parsed datatype and supplies the version itself.
 #[test]
 fn a_recording_built_through_the_constructor_validates() {
     let metadata = Metadata {
-        global: GlobalMetadata::new("cf32_le".parse().expect("cf32_le is a valid datatype")),
+        global: GlobalMetadata::describing("cf32_le".parse().expect("cf32_le is a valid datatype")),
         captures: vec![],
         annotations: vec![],
     };
@@ -322,7 +322,10 @@ fn a_recording_built_through_the_constructor_validates() {
     let written: Value =
         serde_json::from_str(&metadata.to_json().expect("serialize")).expect("output must be JSON");
 
-    assert_valid(&written, "a recording built through GlobalMetadata::new");
+    assert_valid(
+        &written,
+        "a recording built through GlobalMetadata::describing",
+    );
 }
 
 /// Our test data is honest before it is allowed to judge the crate.
@@ -610,27 +613,26 @@ fn set_extension_declares_the_extension_it_writes() {
 /// One claim runs through all of them, and it is the claim the typed write path
 /// exists to make: `core:datatype` and `core:sha512` describe the Dataset that was
 /// actually written, and cannot be talked into describing anything else.
-/// A Recording of a coast-station DSC watch on 16 MHz at 32 kSa/s — the case this
-/// crate was written to serve, and the one `realistic_recording.sigmf-meta`
-/// describes.
+/// The document for a Recording of a coast-station DSC watch on 16 MHz at
+/// 32 kSa/s — the case this crate was written to serve, and the one
+/// `realistic_recording.sigmf-meta` describes.
 ///
 /// `datatype` is the caller's *claim*, and it is a parameter because several tests
 /// hand in a claim that is false and assert the written file contradicts it.
-fn a_dsc_watch_recording(datatype: &str) -> SigMF {
-    let mut global = GlobalMetadata::new(datatype.parse().expect("a valid datatype"));
+fn a_dsc_watch_metadata(datatype: &str) -> Metadata {
+    let mut global = GlobalMetadata::describing(datatype.parse().expect("a valid datatype"));
     global.sample_rate = Some(32_000.0);
     global.recorder = Some("winradio-agent".to_string());
 
-    SigMF::new(Metadata {
+    let mut capture = CaptureMetadata::new(0);
+    capture.frequency = Some(16_804_500.0);
+    capture.datetime = Some("2026-07-16T09:14:22.000Z".to_string());
+
+    Metadata {
         global,
-        captures: vec![serde_json::from_value(json!({
-            "core:sample_start": 0,
-            "core:frequency": 16_804_500.0,
-            "core:datetime": "2026-07-16T09:14:22.000Z",
-        }))
-        .expect("the capture literal must deserialize")],
+        captures: vec![capture],
         annotations: vec![],
-    })
+    }
 }
 
 /// Samples with no two components alike, so that a test can tell in-phase from
@@ -671,9 +673,9 @@ mod write_path {
         let dir = TempDir::new().expect("a temp dir");
         let basename = dir.path().join("dsc_watch");
 
-        let mut recording = a_dsc_watch_recording("ri16_le");
-        recording
-            .to_file(&basename, &dsc_samples())
+        let samples = dsc_samples();
+        let recording = RecordingWriter::with_metadata(&samples, a_dsc_watch_metadata("ri16_le"))
+            .to_file(&basename)
             .expect("writing must succeed");
 
         let written = read_json(&sibling(&basename, ".sigmf-meta"));
@@ -685,7 +687,7 @@ mod write_path {
         assert_eq!(
             recording.metadata.global.datatype.to_string(),
             "cf32_le",
-            "and the metadata still in hand must agree with the file, rather than \
+            "and the recording handed back must agree with the file, rather than \
              keeping a claim the caller could go on to write somewhere else"
         );
     }
@@ -696,9 +698,9 @@ mod write_path {
         let dir = TempDir::new().expect("a temp dir");
         let basename = dir.path().join("dsc_watch");
 
-        let mut recording = a_dsc_watch_recording("cf32_le");
-        recording
-            .to_file(&basename, &dsc_samples())
+        let samples = dsc_samples();
+        RecordingWriter::with_metadata(&samples, a_dsc_watch_metadata("cf32_le"))
+            .to_file(&basename)
             .expect("writing must succeed");
 
         assert_valid(
@@ -714,9 +716,8 @@ mod write_path {
         let basename = dir.path().join("dsc_watch");
 
         let samples = dsc_samples();
-        let mut recording = a_dsc_watch_recording("cf32_le");
-        recording
-            .to_file(&basename, &samples)
+        RecordingWriter::with_metadata(&samples, a_dsc_watch_metadata("cf32_le"))
+            .to_file(&basename)
             .expect("writing must succeed");
 
         let reopened =
@@ -753,13 +754,9 @@ mod write_path {
         let basename = dir.path().join("dsc_watch");
 
         let samples = dsc_samples();
-        let mut recording = a_dsc_watch_recording("cf32_le");
-        recording
-            .to_file_with(
-                &basename,
-                &samples,
-                WriteOptions::default().endianness(Endianness::BigEndian),
-            )
+        RecordingWriter::with_metadata(&samples, a_dsc_watch_metadata("cf32_le"))
+            .endianness(Endianness::BigEndian)
+            .to_file(&basename)
             .expect("writing must succeed");
 
         let written = read_json(&sibling(&basename, ".sigmf-meta"));
@@ -788,9 +785,9 @@ mod write_path {
         let dir = TempDir::new().expect("a temp dir");
         let basename = dir.path().join("dsc_watch");
 
-        let mut recording = a_dsc_watch_recording("cf32_le");
-        recording
-            .to_file(&basename, &dsc_samples())
+        let samples = dsc_samples();
+        RecordingWriter::with_metadata(&samples, a_dsc_watch_metadata("cf32_le"))
+            .to_file(&basename)
             .expect("writing must succeed");
 
         let on_disk = fs::read(sibling(&basename, ".sigmf-data")).expect("a dataset");
@@ -815,14 +812,12 @@ mod write_path {
         let dir = TempDir::new().expect("a temp dir");
         let basename = dir.path().join("dsc_watch");
 
-        let mut recording = a_dsc_watch_recording("cf32_le");
-        recording.metadata.global.sha512 = Some("0".repeat(128));
-        recording
-            .to_file_with(
-                &basename,
-                &dsc_samples(),
-                WriteOptions::default().checksum(false),
-            )
+        let samples = dsc_samples();
+        let mut metadata = a_dsc_watch_metadata("cf32_le");
+        metadata.global.sha512 = Some("0".repeat(128));
+        RecordingWriter::with_metadata(&samples, metadata)
+            .checksum(false)
+            .to_file(&basename)
             .expect("writing must succeed");
 
         let written = read_json(&sibling(&basename, ".sigmf-meta"));
@@ -846,10 +841,11 @@ mod write_path {
         let dir = TempDir::new().expect("a temp dir");
         let basename = dir.path().join("dsc_watch");
 
-        let mut recording = a_dsc_watch_recording("cf32_le");
-        recording.metadata.global.num_channels = Some(2);
-        let error = recording
-            .to_file(&basename, &dsc_samples())
+        let samples = dsc_samples();
+        let mut metadata = a_dsc_watch_metadata("cf32_le");
+        metadata.global.num_channels = Some(2);
+        let error = RecordingWriter::with_metadata(&samples, metadata)
+            .to_file(&basename)
             .expect_err("two channels must be refused");
 
         let message = error.to_string();
@@ -863,9 +859,10 @@ mod write_path {
         );
 
         // One channel is what a typed buffer is, whether or not it is spelled out.
-        recording.metadata.global.num_channels = Some(1);
-        recording
-            .to_file(&basename, &dsc_samples())
+        let mut metadata = a_dsc_watch_metadata("cf32_le");
+        metadata.global.num_channels = Some(1);
+        RecordingWriter::with_metadata(&samples, metadata)
+            .to_file(&basename)
             .expect("one channel must be accepted");
     }
 
@@ -887,9 +884,9 @@ mod write_path {
         let basename = dir.path().join("dsc_watch");
         fs::create_dir(sibling(&basename, ".sigmf-meta")).expect("blocking the metadata path");
 
-        let mut recording = a_dsc_watch_recording("cf32_le");
-        recording
-            .to_file(&basename, &dsc_samples())
+        let samples = dsc_samples();
+        RecordingWriter::with_metadata(&samples, a_dsc_watch_metadata("cf32_le"))
+            .to_file(&basename)
             .expect_err("the metadata write must fail");
 
         assert!(
@@ -915,9 +912,9 @@ mod write_path {
         let dir = TempDir::new().expect("a temp dir");
         let basename = dir.path().join("dsc_16804.5kHz");
 
-        let mut recording = a_dsc_watch_recording("cf32_le");
-        recording
-            .to_file(&basename, &dsc_samples())
+        let samples = dsc_samples();
+        RecordingWriter::with_metadata(&samples, a_dsc_watch_metadata("cf32_le"))
+            .to_file(&basename)
             .expect("writing must succeed");
 
         assert!(
@@ -989,9 +986,8 @@ mod write_path {
             );
 
             let basename = dir.path().join(label);
-            let mut recording = a_dsc_watch_recording("cf32_le");
-            recording
-                .to_file(&basename, &[sample])
+            RecordingWriter::new(&[sample])
+                .to_file(&basename)
                 .expect("writing must succeed");
 
             let on_disk = fs::metadata(sibling(&basename, ".sigmf-data"))
@@ -1138,9 +1134,8 @@ mod read_path {
         let basename = dir.path().join("dsc_watch");
 
         let samples = dsc_samples();
-        let mut recording = a_dsc_watch_recording("cf32_le");
-        recording
-            .to_file(&basename, &samples)
+        RecordingWriter::with_metadata(&samples, a_dsc_watch_metadata("cf32_le"))
+            .to_file(&basename)
             .expect("writing must succeed");
 
         let reopened =
@@ -1164,13 +1159,9 @@ mod read_path {
         let basename = dir.path().join("dsc_watch");
 
         let samples = dsc_samples();
-        let mut recording = a_dsc_watch_recording("cf32_le");
-        recording
-            .to_file_with(
-                &basename,
-                &samples,
-                WriteOptions::default().endianness(Endianness::BigEndian),
-            )
+        RecordingWriter::with_metadata(&samples, a_dsc_watch_metadata("cf32_le"))
+            .endianness(Endianness::BigEndian)
+            .to_file(&basename)
             .expect("writing must succeed");
 
         let written = fs::read(sibling(&basename, ".sigmf-data")).expect("dataset");
@@ -1200,9 +1191,8 @@ mod read_path {
         let basename = dir.path().join("dsc_16804.5kHz");
 
         let samples = dsc_samples();
-        let mut recording = a_dsc_watch_recording("cf32_le");
-        recording
-            .to_file(&basename, &samples)
+        RecordingWriter::with_metadata(&samples, a_dsc_watch_metadata("cf32_le"))
+            .to_file(&basename)
             .expect("writing must succeed");
 
         let reopened =
@@ -1223,9 +1213,9 @@ mod read_path {
         // Write a real Recording, then re-describe it as metadata-only. The Dataset
         // is still sitting there on disk, so anything that goes looking will find
         // it — which is what makes this a test of the field rather than of the file.
-        let mut recording = a_dsc_watch_recording("cf32_le");
-        recording
-            .to_file(&basename, &dsc_samples())
+        let samples = dsc_samples();
+        let recording = RecordingWriter::with_metadata(&samples, a_dsc_watch_metadata("cf32_le"))
+            .to_file(&basename)
             .expect("writing must succeed");
         assert!(sibling(&basename, ".sigmf-data").exists());
 
@@ -1261,9 +1251,9 @@ mod read_path {
         let dir = TempDir::new().expect("a temp dir");
         let basename = dir.path().join("dsc_watch");
 
-        let mut recording = a_dsc_watch_recording("cf32_le");
-        recording
-            .to_file(&basename, &dsc_samples())
+        let samples = dsc_samples();
+        let recording = RecordingWriter::with_metadata(&samples, a_dsc_watch_metadata("cf32_le"))
+            .to_file(&basename)
             .expect("writing must succeed");
 
         let mut metadata = recording.metadata;
@@ -1297,7 +1287,7 @@ mod read_path {
             .collect();
         fs::write(dir.path().join("capture.iq"), &dataset).expect("writing the dataset");
 
-        let mut metadata = a_dsc_watch_recording("cf32_le").metadata;
+        let mut metadata = a_dsc_watch_metadata("cf32_le");
         metadata.global.dataset = Some("capture.iq".to_string());
         let sidecar = dir.path().join("dsc_watch.sigmf-meta");
         fs::write(&sidecar, metadata.to_json().expect("serialize")).expect("writing the sidecar");
@@ -1325,16 +1315,10 @@ mod read_path {
             name: &str,
         ) {
             let basename = dir.path().join(name);
-            let mut recording = SigMF::new(Metadata {
-                // Overwritten from `S` by `to_file`; see the write path's tests.
-                global: GlobalMetadata::new("cf32_le".parse().expect("placeholder")),
-                captures: vec![
-                    serde_json::from_value(json!({"core:sample_start": 0})).expect("capture")
-                ],
-                annotations: vec![],
-            });
-            recording
-                .to_file(&basename, samples)
+            let mut writer = RecordingWriter::new(samples);
+            writer.captures_mut().push(CaptureMetadata::new(0));
+            writer
+                .to_file(&basename)
                 .unwrap_or_else(|e| panic!("writing {name}: {e}"));
 
             let reopened = SigMF::from_file(sibling(&basename, ".sigmf-meta"))

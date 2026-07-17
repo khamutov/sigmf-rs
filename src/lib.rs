@@ -8,10 +8,10 @@
 //! needed to interpret the bytes travel *with* the bytes, instead of living in a
 //! README or someone's memory.
 //!
-//! Start at [`SigMF`]. [`SigMF::to_file`] writes both files of a Recording,
-//! [`SigMF::from_file`] opens one, and [`SigMF::samples`] decodes the Dataset.
-//! [`Metadata`] is the document itself, should you want to build or inspect one
-//! without touching a disk.
+//! [`RecordingWriter`] writes a Recording from samples in hand. [`SigMF`] opens
+//! one: [`SigMF::from_file`] reads the sidecar, [`SigMF::samples`] decodes the
+//! Dataset. [`Metadata`] is the document itself, should you want to build or
+//! inspect one without touching a disk.
 //!
 //! # Examples
 //!
@@ -19,22 +19,18 @@
 //!
 //! ```
 //! use sigmf::num_complex::Complex;
-//! use sigmf::Endianness::LittleEndian;
-//! use sigmf::{DataFormat, GlobalMetadata, Metadata, SigMF};
+//! use sigmf::{RecordingWriter, SigMF};
 //! # let dir = tempfile::tempdir().expect("a temporary directory");
 //! # let basename = dir.path().join("dsc_watch");
 //!
-//! let mut recording = SigMF::new(Metadata {
-//!     global: GlobalMetadata::new(DataFormat::of::<Complex<f32>>(LittleEndian)),
-//!     captures: vec![],
-//!     annotations: vec![],
-//! });
-//! recording.metadata.global.sample_rate = Some(32_000.0);
-//! recording.metadata.global.recorder = Some("winradio-agent".to_string());
+//! let samples = vec![Complex::new(1.0f32, 0.0), Complex::new(0.0, -1.0)];
+//!
+//! let mut writer = RecordingWriter::new(&samples);
+//! writer.global_mut().sample_rate = Some(32_000.0);
+//! writer.global_mut().recorder = Some("winradio-agent".to_string());
 //!
 //! // Writes `dsc_watch.sigmf-data` and `dsc_watch.sigmf-meta`.
-//! let samples = vec![Complex::new(1.0f32, 0.0), Complex::new(0.0, -1.0)];
-//! recording.to_file(&basename, &samples)?;
+//! writer.to_file(&basename)?;
 //!
 //! let reopened = SigMF::from_file(dir.path().join("dsc_watch.sigmf-meta"))?;
 //! assert_eq!(reopened.metadata.global.sample_rate, Some(32_000.0));
@@ -49,14 +45,18 @@
 //! as `ci16_le` yield plausible noise at the wrong scale, and a waterfall of
 //! plausible noise looks exactly like a waterfall.
 //!
-//! So this crate does not accept the claim, it *derives* it. [`SigMF::to_file`] is
-//! generic over the sample type, sets `core:datatype` from that type, and overwrites
-//! whatever the [`GlobalMetadata`] held: the field and the bytes cannot disagree,
+//! So this crate does not accept the claim, it *derives* it. Nothing in the write
+//! path asks for a datatype: [`RecordingWriter`] knows the sample type from the
+//! moment it is handed samples, sets `core:datatype` from that type, and overwrites
+//! whatever the [`GlobalMetadata`] held. The field and the bytes cannot disagree,
 //! because only one of them is an input. [`SigMF::samples`] enforces the same
 //! equation from the other side, erroring rather than reinterpreting.
 //!
-//! What the crate cannot defend is a [`Metadata`] you fill in and serialize yourself.
-//! `to_file` cannot lie; [`Metadata::to_json`] will write whatever you put in it.
+//! The one place a datatype is *stated* rather than derived is
+//! [`GlobalMetadata::describing`], for bytes this crate never sees: a Dataset some
+//! other tool wrote, or a `core:metadata_only` document with no Dataset at all.
+//! There the author's word is all there is, and [`Metadata::to_json`] will write
+//! whatever they put in it.
 //!
 //! # The specification is the schema
 //!
@@ -93,9 +93,9 @@ struct ReadmeDoctests;
 /// Re-exported because it is a *public* dependency: `Sample` is implemented for
 /// `num_complex::Complex<f32>` and not for some structurally identical type from
 /// another copy of the crate, so a caller whose `num-complex` resolves to a
-/// different major than ours would find `to_file` mysteriously unwilling to take
-/// their samples. Reaching for `sigmf::num_complex` instead of a direct dependency
-/// makes that impossible to get wrong.
+/// different major than ours would find [`RecordingWriter`] mysteriously unwilling
+/// to take their samples. Reaching for `sigmf::num_complex` instead of a direct
+/// dependency makes that impossible to get wrong.
 pub use num_complex;
 
 /// The extension of a Recording's Metadata file, dot included.
@@ -149,28 +149,26 @@ mod sigmf {
     /// asserted against it by the test suite so the two cannot drift apart.
     pub const SIGMF_VERSION: &str = "1.2.6";
 
-    /// A Recording: a [`Metadata`] document, and the Dataset it describes.
+    /// An opened Recording: a [`Metadata`] document, and the Dataset it describes.
     ///
     /// The Dataset is referred to by path and read only on demand, so this is cheap
     /// to hold regardless of how many samples it names. [`from_file`](Self::from_file)
-    /// opens an existing Recording, [`new`](Self::new) starts one that does not exist
-    /// yet, and [`to_file`](Self::to_file) writes both of its files.
+    /// opens an existing Recording; [`RecordingWriter`] writes a new one and hands
+    /// back the `SigMF` for what it wrote.
     #[derive(Debug)]
     pub struct SigMF {
         /// The document describing the Dataset.
         ///
         /// Public because it is the whole point: reading `core:sample_rate` off a
-        /// Recording, or setting `core:recorder` before writing one, is what callers
-        /// come here to do. Note that [`to_file`](Self::to_file) *overwrites*
-        /// `global.datatype` and `global.sha512` from the samples it is given, so
-        /// setting either by hand accomplishes nothing.
+        /// Recording is what callers come here to do. To *change* a Recording,
+        /// hand this document to [`RecordingWriter::with_metadata`] with the
+        /// samples and write it back out.
         pub metadata: Metadata,
 
         /// The Dataset this Recording's samples live in, if it has one.
         ///
-        /// `None` for a `core:metadata_only` Recording, for a Metadata file whose
-        /// name does not yield a sibling, and for one [`new`](Self::new) has built
-        /// but nothing has yet written.
+        /// `None` for a `core:metadata_only` Recording, and for a Metadata file
+        /// whose name does not yield a sibling.
         datafile: Option<PathBuf>,
     }
 
@@ -225,9 +223,9 @@ mod sigmf {
         /// the whole reason the method is generic rather than handing back bytes:
         /// reading a `cf32_le` Dataset as `ci16_le` produces no error and no
         /// obviously wrong number, just plausible noise at the wrong scale — the
-        /// same silent-garbage failure that [`to_file`](Self::to_file) prevents on
-        /// the way out, arriving from the other direction. Nothing about a `&[u8]`
-        /// can be checked; `S` can.
+        /// same silent-garbage failure that [`RecordingWriter::to_file`] prevents
+        /// on the way out, arriving from the other direction. Nothing about a
+        /// `&[u8]` can be checked; `S` can.
         ///
         /// # Cost
         ///
@@ -254,20 +252,15 @@ mod sigmf {
         ///
         /// ```
         /// use sigmf::num_complex::Complex;
-        /// use sigmf::Endianness::LittleEndian;
-        /// use sigmf::{DataFormat, Error, GlobalMetadata, Metadata, MetadataError, SigMF};
+        /// use sigmf::{Error, MetadataError, RecordingWriter, SigMF};
         /// # let dir = tempfile::tempdir().expect("a temporary directory");
         /// # let basename = dir.path().join("capture");
         ///
-        /// let mut recording = SigMF::new(Metadata {
-        ///     global: GlobalMetadata::new(DataFormat::of::<Complex<f32>>(LittleEndian)),
-        ///     captures: vec![],
-        ///     annotations: vec![],
-        /// });
-        /// recording.to_file(&basename, &[Complex::new(1.0f32, 0.0)])?;
+        /// let samples = [Complex::new(1.0f32, 0.0)];
+        /// RecordingWriter::new(&samples).to_file(&basename)?;
         ///
         /// let reopened = SigMF::from_file(dir.path().join("capture.sigmf-meta"))?;
-        /// assert_eq!(reopened.samples::<Complex<f32>>()?, [Complex::new(1.0f32, 0.0)]);
+        /// assert_eq!(reopened.samples::<Complex<f32>>()?, samples);
         ///
         /// let err = reopened
         ///     .samples::<Complex<i16>>()
@@ -294,7 +287,7 @@ mod sigmf {
                 .into());
             }
 
-            // The mirror of `to_file_with`'s refusal, and for the same reason: with
+            // The mirror of `RecordingWriter::to_file`'s refusal, and for the same reason: with
             // several channels interleaved into the Dataset, one element of a
             // `Vec<S>` is one channel's sample, and the Vec says nothing about
             // which. Deinterleaving wants a return type that admits channels exist.
@@ -326,165 +319,6 @@ mod sigmf {
                 samples.extend(whole_samples.map(|sample| S::decode(endianness, sample)));
             }
             Ok(samples)
-        }
-
-        /// A Recording that describes samples not yet written.
-        ///
-        /// `metadata.global.datatype` is not read by [`to_file`](Self::to_file) —
-        /// it is overwritten by it — so whatever [`GlobalMetadata::new`] was handed
-        /// is a placeholder until the samples arrive and settle the question.
-        pub fn new(metadata: Metadata) -> Self {
-            Self {
-                metadata,
-                datafile: None,
-            }
-        }
-
-        /// Write both files of the Recording, little-endian, with a checksum.
-        ///
-        /// See [`to_file_with`](Self::to_file_with), which this defers to, for what
-        /// gets written and what gets overwritten.
-        ///
-        /// # Examples
-        ///
-        /// A Global's `core:datatype` is a claim, and writing settles it. Here the
-        /// claim is wrong, and the file describes its own bytes anyway:
-        ///
-        /// ```
-        /// use sigmf::num_complex::Complex;
-        /// use sigmf::{GlobalMetadata, Metadata, SigMF};
-        /// # let dir = tempfile::tempdir().expect("a temporary directory");
-        /// # let basename = dir.path().join("capture");
-        ///
-        /// // A Global claiming 16-bit real samples ...
-        /// let mut recording = SigMF::new(Metadata {
-        ///     global: GlobalMetadata::new("ri16_le".parse().expect("a valid datatype")),
-        ///     captures: vec![],
-        ///     annotations: vec![],
-        /// });
-        ///
-        /// // ... handed complex 32-bit floats.
-        /// recording.to_file(&basename, &[Complex::new(1.0f32, 0.0)])?;
-        ///
-        /// // The samples win: `ri16_le` was never written anywhere.
-        /// assert_eq!(recording.metadata.global.datatype.to_string(), "cf32_le");
-        ///
-        /// // Eight bytes for the one sample, and a checksum over them.
-        /// let data = std::fs::metadata(dir.path().join("capture.sigmf-data"))
-        ///     .expect("the Dataset was written");
-        /// assert_eq!(data.len(), 8);
-        /// assert!(recording.metadata.global.sha512.is_some());
-        /// # Ok::<(), sigmf::Error>(())
-        /// ```
-        pub fn to_file<S: Sample, P: AsRef<Path>>(
-            &mut self,
-            basename: P,
-            samples: &[S],
-        ) -> Result<(), Error> {
-            self.to_file_with(basename, samples, WriteOptions::default())
-        }
-
-        /// Write both files of the Recording: `basename.sigmf-data` from `samples`,
-        /// and `basename.sigmf-meta` describing them.
-        ///
-        /// # `core:datatype` is set, not read
-        ///
-        /// The datatype is derived from `S` and **overwrites** whatever
-        /// `self.metadata.global.datatype` held. This is the crate's central
-        /// guarantee and the reason the write path is generic: the field and the
-        /// bytes cannot disagree, because only one of them is an input. A caller
-        /// who builds a Global saying `ri16_le` and then writes `Complex<f32>`
-        /// samples gets a `cf32_le` file — their claim was wrong, and the file
-        /// tells the truth about its own contents.
-        ///
-        /// `core:sha512` is set the same way and for the same reason: computed from
-        /// the bytes being written, or, if [`WriteOptions::checksum`] is off,
-        /// *cleared* rather than left to describe a Dataset that no longer exists.
-        ///
-        /// # Ordering
-        ///
-        /// The Dataset is written first and the Metadata last, so that a process
-        /// that dies mid-write leaves either a complete Recording or a `.sigmf-data`
-        /// with no sidecar — visibly unfinished. The reverse order can leave a
-        /// sidecar that looks valid while describing a truncated Dataset, which is
-        /// worse than an obvious failure. With `core:sha512` written, the
-        /// distinction is not merely visible but provable.
-        ///
-        /// # Errors
-        ///
-        /// Returns [`MetadataError::MultiChannelDataset`] if `core:num_channels` is
-        /// set to anything but 1 (see the SigMF specification's advice to use
-        /// Collections instead), or [`Error::Io`] if either file cannot be written.
-        ///
-        /// # Examples
-        ///
-        /// Writing big-endian and without a checksum. Note that turning the checksum
-        /// off *clears* `core:sha512`, so a Recording written twice cannot end up
-        /// carrying a hash of the Dataset it used to have:
-        ///
-        /// ```
-        /// use sigmf::num_complex::Complex;
-        /// use sigmf::Endianness::LittleEndian;
-        /// use sigmf::{DataFormat, Endianness, GlobalMetadata, Metadata, SigMF, WriteOptions};
-        /// # let dir = tempfile::tempdir().expect("a temporary directory");
-        /// # let basename = dir.path().join("capture");
-        ///
-        /// let mut recording = SigMF::new(Metadata {
-        ///     global: GlobalMetadata::new(DataFormat::of::<Complex<f32>>(LittleEndian)),
-        ///     captures: vec![],
-        ///     annotations: vec![],
-        /// });
-        ///
-        /// recording.to_file(&basename, &[Complex::new(1.0f32, 0.0)])?;
-        /// assert!(recording.metadata.global.sha512.is_some(), "on by default");
-        ///
-        /// recording.to_file_with(
-        ///     &basename,
-        ///     &[Complex::new(1.0f32, 0.0)],
-        ///     WriteOptions::default()
-        ///         .endianness(Endianness::BigEndian)
-        ///         .checksum(false),
-        /// )?;
-        ///
-        /// // The byte order is not a preference the file keeps to itself.
-        /// assert_eq!(recording.metadata.global.datatype.to_string(), "cf32_be");
-        /// assert!(recording.metadata.global.sha512.is_none(), "cleared, not stale");
-        /// # Ok::<(), sigmf::Error>(())
-        /// ```
-        pub fn to_file_with<S: Sample, P: AsRef<Path>>(
-            &mut self,
-            basename: P,
-            samples: &[S],
-            options: WriteOptions,
-        ) -> Result<(), Error> {
-            // A `&[S]` is one channel by construction: nothing in the slice can say
-            // where one channel ends and the next begins, so honouring
-            // `core:num_channels > 1` would mean writing a datatype that describes
-            // something other than the bytes.
-            if let Some(channels) = self.metadata.global.num_channels {
-                if channels != 1 {
-                    return Err(MetadataError::MultiChannelDataset(channels).into());
-                }
-            }
-
-            let datatype = DataFormat::of::<S>(options.endianness);
-            let mut data = Vec::with_capacity(samples.len() * datatype.size() as usize);
-            for sample in samples {
-                sample.encode(options.endianness, &mut data);
-            }
-
-            self.metadata.global.datatype = datatype;
-            self.metadata.global.sha512 =
-                options.checksum.then(|| hex_encode(&Sha512::digest(&data)));
-
-            let data_path = append_extension(basename.as_ref(), SIGMF_DATASET_EXT);
-            let metadata_path = append_extension(basename.as_ref(), SIGMF_METADATA_EXT);
-
-            fs::write(&data_path, &data).map_err(at(&data_path))?;
-            fs::write(&metadata_path, self.metadata.to_json()?).map_err(at(&metadata_path))?;
-
-            self.datafile = Some(data_path);
-            Ok(())
         }
     }
 
@@ -593,49 +427,202 @@ mod sigmf {
         }
     }
 
-    /// The knobs [`SigMF::to_file_with`] turns, with sane values from [`Default`].
+    /// Writes a Recording: samples in hand, two files out.
     ///
-    /// Both defaults are safe to take blind, and it is worth saying why, because
-    /// defaulting a field of `core:datatype` would be alarming in any other design:
-    /// whatever byte order this picks is the byte order the emitted datatype
-    /// *states*. The choice cannot make a Recording lie about itself; at worst it
-    /// makes one inconvenient to a reader that wanted the other order.
-    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-    pub struct WriteOptions {
+    /// The write-path counterpart of [`SigMF`], which opens Recordings. A writer
+    /// starts from the one thing every write must have — the samples — and derives
+    /// `core:datatype` from their type, so there is no placeholder to invent and no
+    /// claim that can drift from the bytes. Everything else about the document is
+    /// reachable through [`global_mut`](Self::global_mut),
+    /// [`captures_mut`](Self::captures_mut), and
+    /// [`annotations_mut`](Self::annotations_mut); the two write options are the
+    /// builder methods [`endianness`](Self::endianness) and
+    /// [`checksum`](Self::checksum).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use sigmf::num_complex::Complex;
+    /// use sigmf::RecordingWriter;
+    /// # let dir = tempfile::tempdir().expect("a temporary directory");
+    /// # let basename = dir.path().join("dsc_watch");
+    ///
+    /// let samples = vec![Complex::new(0.0f32, 1.0); 32];
+    /// let mut writer = RecordingWriter::new(&samples);
+    /// writer.global_mut().sample_rate = Some(32_000.0);
+    /// writer.to_file(&basename)?;
+    /// # Ok::<(), sigmf::Error>(())
+    /// ```
+    #[derive(Debug)]
+    pub struct RecordingWriter<'a, S: Sample> {
+        samples: &'a [S],
+        metadata: Metadata,
         endianness: Endianness,
         checksum: bool,
     }
 
-    impl Default for WriteOptions {
-        /// Little-endian, checksummed.
+    impl<'a, S: Sample> RecordingWriter<'a, S> {
+        /// A writer for a fresh Recording of `samples`.
         ///
-        /// Little-endian because it is what essentially every IQ recorder emits and
-        /// what the schema's own `core:datatype` examples use. Checksummed because
-        /// a Recording that cannot prove its Dataset is intact is one you can only
-        /// hope about — and the hash costs one pass over a buffer already in hand.
-        fn default() -> Self {
+        /// The datatype is not among the inputs, here or anywhere: `samples`
+        /// already knows it. Little-endian and checksummed unless
+        /// [`endianness`](Self::endianness) or [`checksum`](Self::checksum) says
+        /// otherwise.
+        pub fn new(samples: &'a [S]) -> Self {
             Self {
+                samples,
+                // The datatype seeded here is re-derived by `to_file`, where the
+                // final byte order is known; it exists so the document is complete
+                // from the first moment `global_mut` can see it.
+                metadata: Metadata {
+                    global: GlobalMetadata::describing(DataFormat::of::<S>(
+                        Endianness::LittleEndian,
+                    )),
+                    captures: vec![],
+                    annotations: vec![],
+                },
                 endianness: Endianness::LittleEndian,
                 checksum: true,
             }
         }
-    }
 
-    impl WriteOptions {
+        /// A writer that starts from an existing document instead of an empty one.
+        ///
+        /// This is the read → write bridge: open a Recording with
+        /// [`SigMF::from_file`], take its [`metadata`](SigMF::metadata), and hand
+        /// it here with the samples to write. Captures and annotations travel
+        /// whole; `core:datatype` and `core:sha512` are still derived at
+        /// [`to_file`](Self::to_file), because they describe the bytes this writer
+        /// writes, not the ones the document used to describe.
+        ///
+        /// The byte order defaults to the one `metadata` already states, so a
+        /// round-trip cannot silently flip it; [`endianness`](Self::endianness)
+        /// overrides.
+        pub fn with_metadata(samples: &'a [S], metadata: Metadata) -> Self {
+            let endianness = metadata
+                .global
+                .datatype
+                .endianness()
+                .unwrap_or(Endianness::LittleEndian);
+            Self {
+                samples,
+                metadata,
+                endianness,
+                checksum: true,
+            }
+        }
+
+        /// The Global object of the document being written.
+        ///
+        /// Every field is settable, and exactly one is then ignored:
+        /// `core:datatype` (with its companion `core:sha512`) is derived from the
+        /// samples by [`to_file`](Self::to_file), whatever was set here.
+        pub fn global_mut(&mut self) -> &mut GlobalMetadata {
+            &mut self.metadata.global
+        }
+
+        /// The Captures segments of the document being written.
+        pub fn captures_mut(&mut self) -> &mut Vec<CaptureMetadata> {
+            &mut self.metadata.captures
+        }
+
+        /// The annotations of the document being written.
+        pub fn annotations_mut(&mut self) -> &mut Vec<AnnotationMetadata> {
+            &mut self.metadata.annotations
+        }
+
         /// Write samples in this byte order, and say so in `core:datatype`.
         pub fn endianness(mut self, endianness: Endianness) -> Self {
             self.endianness = endianness;
             self
         }
 
-        /// Whether to compute `core:sha512` over the Dataset.
+        /// Whether to compute `core:sha512` over the Dataset. On by default.
         ///
-        /// Turning this off omits the field rather than preserving any hash the
-        /// Global already carried, which would otherwise describe a Dataset that
-        /// has just been replaced.
+        /// Turning this off *clears* the field rather than preserving any hash
+        /// the document already carried, which would otherwise describe a Dataset
+        /// that has just been replaced.
         pub fn checksum(mut self, checksum: bool) -> Self {
             self.checksum = checksum;
             self
+        }
+
+        /// Write both files of the Recording: `basename.sigmf-data` from the
+        /// samples, and `basename.sigmf-meta` describing them. Returns the written
+        /// Recording, already open for reading.
+        ///
+        /// # `core:datatype` is set, not read
+        ///
+        /// The datatype is derived from the sample type and **overwrites** whatever
+        /// the document held. This is the crate's central guarantee and the reason
+        /// the write path is typed: the field and the bytes cannot disagree,
+        /// because only one of them is an input. `core:sha512` is set the same way
+        /// and for the same reason: computed from the bytes being written, or, if
+        /// [`checksum`](Self::checksum) is off, *cleared* rather than left to
+        /// describe a Dataset that no longer exists.
+        ///
+        /// ```
+        /// use sigmf::num_complex::Complex;
+        /// use sigmf::RecordingWriter;
+        /// # let dir = tempfile::tempdir().expect("a temporary directory");
+        /// # let basename = dir.path().join("capture");
+        ///
+        /// let samples = [Complex::new(1.0f32, 0.0)];
+        /// let mut writer = RecordingWriter::new(&samples);
+        /// // A claim of 16-bit real samples, handed complex 32-bit floats.
+        /// writer.global_mut().datatype = "ri16_le".parse().expect("a valid datatype");
+        /// let written = writer.to_file(&basename)?;
+        ///
+        /// // The samples win: `ri16_le` was never written anywhere.
+        /// assert_eq!(written.metadata.global.datatype.to_string(), "cf32_le");
+        /// # Ok::<(), sigmf::Error>(())
+        /// ```
+        ///
+        /// # Ordering
+        ///
+        /// The Dataset is written first and the Metadata last, so that a process
+        /// that dies mid-write leaves either a complete Recording or a
+        /// `.sigmf-data` with no sidecar — visibly unfinished. The reverse order
+        /// can leave a sidecar that looks valid while describing a truncated
+        /// Dataset, which is worse than an obvious failure. With `core:sha512`
+        /// written, the distinction is not merely visible but provable.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`MetadataError::MultiChannelDataset`] if `core:num_channels`
+        /// is set to anything but 1 (see the SigMF specification's advice to use
+        /// Collections instead), or [`Error::Io`] if either file cannot be
+        /// written.
+        pub fn to_file<P: AsRef<Path>>(mut self, basename: P) -> Result<SigMF, Error> {
+            // A `&[S]` is one channel by construction: nothing in the slice can say
+            // where one channel ends and the next begins, so honouring
+            // `core:num_channels > 1` would mean writing a datatype that describes
+            // something other than the bytes.
+            if let Some(channels) = self.metadata.global.num_channels {
+                if channels != 1 {
+                    return Err(MetadataError::MultiChannelDataset(channels).into());
+                }
+            }
+
+            let datatype = DataFormat::of::<S>(self.endianness);
+            let mut data = Vec::with_capacity(self.samples.len() * datatype.size() as usize);
+            for sample in self.samples {
+                sample.encode(self.endianness, &mut data);
+            }
+
+            self.metadata.global.datatype = datatype;
+            self.metadata.global.sha512 = self.checksum.then(|| hex_encode(&Sha512::digest(&data)));
+
+            let data_path = append_extension(basename.as_ref(), SIGMF_DATASET_EXT);
+            let metadata_path = append_extension(basename.as_ref(), SIGMF_METADATA_EXT);
+
+            fs::write(&data_path, &data).map_err(at(&data_path))?;
+            fs::write(&metadata_path, self.metadata.to_json()?).map_err(at(&metadata_path))?;
+
+            Ok(SigMF {
+                metadata: self.metadata,
+                datafile: Some(data_path),
+            })
         }
     }
 
@@ -651,8 +638,8 @@ mod sigmf {
     /// A Metadata can be manipulated without any Dataset present, which is what makes
     /// [`from_json`](Self::from_json) and [`to_json`](Self::to_json) worth having
     /// alongside [`SigMF`]. It is also the type that can lie: a Global's
-    /// `core:datatype` is checked against reality only by [`SigMF::to_file`] and
-    /// [`SigMF::samples`], never by this type on its own.
+    /// `core:datatype` is checked against reality only by [`RecordingWriter::to_file`]
+    /// and [`SigMF::samples`], never by this type on its own.
     #[derive(Debug, Deserialize, Serialize)]
     pub struct Metadata {
         /// What the samples are: format, rate, and provenance.
@@ -827,7 +814,8 @@ mod sigmf {
     /// The `global` scope: what the samples are, and where they came from.
     ///
     /// Only [`datatype`](Self::datatype) and [`version`](Self::version) are required,
-    /// which is why [`new`](Self::new) takes one argument and supplies the other.
+    /// which is why [`describing`](Self::describing) takes one argument and supplies
+    /// the other.
     /// Everything else is optional in the specification and so `Option` here, with
     /// one exception: [`other`](Self::other) is the catch-all that makes this type
     /// lossless, because the schema does not close this object and extension
@@ -837,10 +825,10 @@ mod sigmf {
         /// How to read every byte of the Dataset.
         ///
         /// **Do not set this to describe samples you are about to write.**
-        /// [`SigMF::to_file`] derives it from the sample type and overwrites this;
-        /// the crate-level docs explain why that is not a courtesy but the crate's
-        /// central guarantee. Setting it matters only for a Recording you are
-        /// serializing by hand, which is the one case nothing can check.
+        /// [`RecordingWriter::to_file`] derives it from the sample type and
+        /// overwrites this; the crate-level docs explain why that is not a courtesy
+        /// but the crate's central guarantee. Setting it matters only for a
+        /// document serialized by hand, which is the one case nothing can check.
         #[serde(rename = "core:datatype")]
         pub datatype: DataFormat,
 
@@ -856,7 +844,7 @@ mod sigmf {
         /// The version of the SigMF specification this document is written to, as
         /// `X.Y.Z`.
         ///
-        /// [`new`](Self::new) sets it to [`SIGMF_VERSION`]. Reading a Recording does
+        /// [`describing`](Self::describing) sets it to [`SIGMF_VERSION`]. Reading a Recording does
         /// not check it: this crate parses what it understands and preserves the rest
         /// through [`other`](Self::other), which degrades more gracefully than
         /// refusing a document over a version number.
@@ -866,19 +854,19 @@ mod sigmf {
         /// The number of channels interleaved into the Dataset.
         ///
         /// Absent means 1. Anything other than 1 is refused by both
-        /// [`SigMF::to_file`] and [`SigMF::samples`], which deal in a flat `[S]` that
-        /// cannot say which channel a sample belongs to — the specification's own
-        /// advice is to use a Collection rather than this field.
+        /// [`RecordingWriter::to_file`] and [`SigMF::samples`], which deal in a flat
+        /// `[S]` that cannot say which channel a sample belongs to — the
+        /// specification's own advice is to use a Collection rather than this field.
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "core:num_channels")]
         pub num_channels: Option<u64>,
 
         /// SHA-512 of the Dataset file, lowercase hex.
         ///
-        /// [`SigMF::to_file`] computes and overwrites this, or clears it when
-        /// [`WriteOptions::checksum`] is off — a stale hash describing a Dataset that
-        /// no longer exists is worse than no hash. Nothing in this crate verifies it
-        /// on read.
+        /// [`RecordingWriter::to_file`] computes and overwrites this, or clears it
+        /// when [`RecordingWriter::checksum`] is off — a stale hash describing a
+        /// Dataset that no longer exists is worse than no hash. Nothing in this
+        /// crate verifies it on read.
         #[serde(skip_serializing_if = "Option::is_none")]
         #[serde(rename = "core:sha512")]
         pub sha512: Option<String>,
@@ -1079,6 +1067,38 @@ mod sigmf {
         /// written back as nothing.
         #[serde(flatten)]
         pub other: Map<String, Value>,
+    }
+
+    impl CaptureMetadata {
+        /// A segment taking effect at `sample_start`, carrying the one field the
+        /// specification requires of a Captures segment and stating nothing else.
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// let mut capture = sigmf::CaptureMetadata::new(0);
+        /// capture.frequency = Some(16_804_500.0);
+        ///
+        /// // Only what was set reaches the document — a fresh segment invents
+        /// // no claims on the author's behalf.
+        /// let value = serde_json::to_value(&capture)?;
+        /// assert_eq!(
+        ///     value,
+        ///     serde_json::json!({"core:sample_start": 0, "core:frequency": 16_804_500.0})
+        /// );
+        /// # Ok::<(), serde_json::Error>(())
+        /// ```
+        pub fn new(sample_start: u64) -> CaptureMetadata {
+            CaptureMetadata {
+                sample_start,
+                global_index: None,
+                frequency: None,
+                datetime: None,
+                geolocation: None,
+                header_bytes: None,
+                other: Map::new(),
+            }
+        }
     }
 
     /// One annotation: something somebody claims is in the samples.
@@ -1533,7 +1553,8 @@ mod sigmf {
         /// such file or directory" is its whole message — and because the caller
         /// frequently does not have one either. Only [`SigMF::from_file`] touches a
         /// file the caller named; the Dataset is *derived* from the Metadata file's
-        /// name, and [`SigMF::to_file`] derives both of its files from a basename.
+        /// name, and [`RecordingWriter::to_file`] derives both of its files from a
+        /// basename.
         /// An error from any of those without a path names nothing the caller could
         /// look up.
         #[error("{path}: {source}", path = path.display())]
@@ -1700,27 +1721,39 @@ mod sigmf {
     }
 
     impl GlobalMetadata {
-        /// A global object carrying the two fields the specification requires —
-        /// `core:datatype` and `core:version` — and nothing else.
+        /// A global object describing bytes this crate will never see, carrying the
+        /// two fields the specification requires — `core:datatype` and
+        /// `core:version` — and nothing else.
         ///
-        /// There is deliberately no [`Default`]: the schema requires both of these,
-        /// and neither has a defensible default. A datatype cannot be guessed, and
-        /// defaulting the version to whatever the crate happens to implement is
-        /// exactly right for a recording being *written* — which is why it is set
-        /// here — but would be a fabrication anywhere else.
+        /// This is the constructor for the documents only their author can get
+        /// right: a Non-Conforming Dataset some other tool wrote, or a
+        /// `core:metadata_only` document describing bytes that are not distributed
+        /// at all. In both, the datatype is a fact the author *states* — nothing
+        /// can derive or check it. To write samples you hold, use
+        /// [`RecordingWriter`], which derives the datatype instead of asking.
+        ///
+        /// There is deliberately no [`Default`]: the schema requires both of these
+        /// fields, and neither has a defensible default. A datatype cannot be
+        /// guessed, and defaulting the version to whatever the crate happens to
+        /// implement is exactly right for a document being *authored* — which is
+        /// why it is set here — but would be a fabrication anywhere else.
         ///
         /// # Examples
         ///
-        /// ```
-        /// use sigmf::num_complex::Complex;
-        /// use sigmf::Endianness::LittleEndian;
-        /// use sigmf::{DataFormat, GlobalMetadata};
+        /// A colleague's raw capture, described after the fact. The datatype
+        /// arrives as a value — a README, a config file — which is why this takes
+        /// [`DataFormat`] rather than a sample type:
         ///
-        /// let global = GlobalMetadata::new(DataFormat::of::<Complex<f32>>(LittleEndian));
-        /// assert_eq!(global.datatype.to_string(), "cf32_le");
-        /// assert_eq!(global.version, sigmf::SIGMF_VERSION);
         /// ```
-        pub fn new(datatype: DataFormat) -> GlobalMetadata {
+        /// use sigmf::GlobalMetadata;
+        ///
+        /// let mut global = GlobalMetadata::describing("ri16_le".parse()?);
+        /// global.dataset = Some("capture.dat".to_string());
+        /// assert_eq!(global.datatype.to_string(), "ri16_le");
+        /// assert_eq!(global.version, sigmf::SIGMF_VERSION);
+        /// # Ok::<(), sigmf::ParseDataFormatError>(())
+        /// ```
+        pub fn describing(datatype: DataFormat) -> GlobalMetadata {
             GlobalMetadata {
                 version: SIGMF_VERSION.to_string(),
                 datatype,
@@ -1783,7 +1816,7 @@ mod sigmf {
         /// use sigmf::Endianness::LittleEndian;
         /// use sigmf::{AntennaGlobal, DataFormat, GlobalMetadata};
         ///
-        /// let mut global = GlobalMetadata::new(DataFormat::of::<Complex<f32>>(LittleEndian));
+        /// let mut global = GlobalMetadata::describing(DataFormat::of::<Complex<f32>>(LittleEndian));
         /// global.set_extension(AntennaGlobal {
         ///     model: "Wellbrook ALA1530".to_string(),
         ///     ..Default::default()
@@ -2005,7 +2038,7 @@ mod sigmf {
         /// The `core:datatype` a Dataset of `S` samples written in `endianness`
         /// carries.
         ///
-        /// This is the derivation [`SigMF::to_file`] performs, exposed because a
+        /// This is the derivation [`RecordingWriter::to_file`] performs, exposed because a
         /// caller may reasonably want to know what it is about to write. Note what
         /// is missing from the signature: there is no sample buffer, because the
         /// answer is a function of the *type*, and no fallible path, because there
@@ -2076,7 +2109,7 @@ mod sigmf {
     /// housekeeping. `core:datatype` is a claim about the bytes of the Dataset, and
     /// it is the claim every reader trusts in order to interpret them — read
     /// `cf32_le` bytes as `ci16_le` and there is no error, only plausible noise.
-    /// Sealing is what earns [`SigMF::to_file`] the right to *derive* that claim
+    /// Sealing is what earns [`RecordingWriter::to_file`] the right to *derive* that claim
     /// from `S` instead of trusting a caller to state it: a downstream
     /// `impl Sample for MyType` announcing `f32` while occupying eight bytes would
     /// turn the derivation into a lie told by a signature that looks like it

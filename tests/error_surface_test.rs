@@ -56,15 +56,7 @@ impl GlobalExtension for NotAnObject {
 }
 
 fn a_global() -> GlobalMetadata {
-    GlobalMetadata::new("cf32_le".parse().expect("cf32_le is a valid datatype"))
-}
-
-fn a_recording() -> SigMF {
-    SigMF::new(Metadata {
-        global: a_global(),
-        captures: vec![],
-        annotations: vec![],
-    })
+    GlobalMetadata::describing("cf32_le".parse().expect("cf32_le is a valid datatype"))
 }
 
 /// The cause of a serde-caused failure is reachable, not just printable.
@@ -215,12 +207,13 @@ fn every_fallible_method_converges_on_one_error_type() -> Result<(), Error> {
     let dir = TempDir::new().expect("a temporary directory");
     let basename = dir.path().join("convergence");
 
-    let mut recording = a_recording();
-    recording.metadata.global.set_extension(AntennaGlobal {
+    let samples = [Complex::new(1.0f32, 0.0)];
+    let mut writer = RecordingWriter::new(&samples);
+    writer.global_mut().set_extension(AntennaGlobal {
         model: "Wellbrook ALA1530".to_string(),
         ..Default::default()
     })?; // MetadataError
-    recording.to_file(&basename, &[Complex::new(1.0f32, 0.0)])?; // Error
+    let recording = writer.to_file(&basename)?; // Error
 
     let json = recording.metadata.to_json()?; // serde_json::Error
     let parsed = Metadata::from_json(&json)?; // serde_json::Error

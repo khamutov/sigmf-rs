@@ -37,7 +37,7 @@ fn test_parse_metadata() -> Result<(), Box<dyn Error>> {
                 "my_ns:some_prop".to_string(),
                 serde_json::value::Value::String("custom_val".to_string())
             )]),
-            ..GlobalMetadata::new("rf32_le".parse()?)
+            ..GlobalMetadata::describing("rf32_le".parse()?)
         }
     );
     Ok(())
@@ -84,7 +84,7 @@ fn test_parse_metadata_with_antenna() -> Result<(), Box<dyn Error>> {
                     serde_json::value::Value::String("dipole".to_string())
                 )
             ]),
-            ..GlobalMetadata::new("rf32_le".parse()?)
+            ..GlobalMetadata::describing("rf32_le".parse()?)
         }
     );
     assert_eq!(
@@ -198,7 +198,7 @@ fn test_parse_roundtrip_with_extention() -> Result<(), Box<dyn Error>> {
 /// Declaring a namespace twice replaces the declaration rather than duplicating it.
 #[test]
 fn setting_an_extension_twice_declares_it_once() -> Result<(), Box<dyn Error>> {
-    let mut global = GlobalMetadata::new("rf32_le".parse()?);
+    let mut global = GlobalMetadata::describing("rf32_le".parse()?);
 
     for model in ["ARA CSB-16", "Wellbrook ALA1530"] {
         global.set_extension(AntennaGlobal {
