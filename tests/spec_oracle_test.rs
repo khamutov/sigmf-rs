@@ -32,7 +32,7 @@ use std::sync::OnceLock;
 use serde_json::{json, Value};
 use sha2::{Digest, Sha512};
 use sigmf::num_complex::Complex;
-use sigmf::sigmf::*;
+use sigmf::*;
 use tempfile::TempDir;
 
 /// The SigMF version vendored at `tests/spec/sigmf-schema.json`, as it appears in
@@ -144,7 +144,7 @@ fn round_trip(name: &str) -> Value {
         .unwrap_or_else(|e| panic!("{name} must open, but did not: {e}"));
     let written = reopened
         .metadata
-        .to_str()
+        .to_json()
         .unwrap_or_else(|e| panic!("{name} must serialize, but did not: {e}"));
     serde_json::from_str(&written)
         .unwrap_or_else(|e| panic!("{name} serialized to something that is not JSON: {e}"))
@@ -320,7 +320,7 @@ fn a_recording_built_through_the_constructor_validates() {
     };
 
     let written: Value =
-        serde_json::from_str(&metadata.to_str().expect("serialize")).expect("output must be JSON");
+        serde_json::from_str(&metadata.to_json().expect("serialize")).expect("output must be JSON");
 
     assert_valid(&written, "a recording built through GlobalMetadata::new");
 }
@@ -580,7 +580,7 @@ fn set_extension_declares_the_extension_it_writes() {
         })
         .expect("set_extension must succeed");
 
-    let written: Value = serde_json::from_str(&sigmf.metadata.to_str().expect("serialize"))
+    let written: Value = serde_json::from_str(&sigmf.metadata.to_json().expect("serialize"))
         .expect("output must be JSON");
 
     assert_eq!(
@@ -758,7 +758,7 @@ mod write_path {
             .to_file_with(
                 &basename,
                 &samples,
-                WriteOptions::default().endianness(Endianess::BigEndian),
+                WriteOptions::default().endianness(Endianness::BigEndian),
             )
             .expect("writing must succeed");
 
@@ -939,7 +939,7 @@ mod write_path {
     /// sixteen by name.
     #[test]
     fn every_sample_type_maps_to_the_datatype_the_specification_spells_it() {
-        let le = Endianess::LittleEndian;
+        let le = Endianness::LittleEndian;
         assert_eq!(DataFormat::of::<f32>(le).to_string(), "rf32_le");
         assert_eq!(DataFormat::of::<f64>(le).to_string(), "rf64_le");
         assert_eq!(DataFormat::of::<i32>(le).to_string(), "ri32_le");
@@ -962,7 +962,7 @@ mod write_path {
         // there is none to choose: one byte has no order, `ri8_le` is not a
         // datatype, and `DataFormat`'s parser rejects it — so the writer must never
         // emit it.
-        let be = Endianess::BigEndian;
+        let be = Endianness::BigEndian;
         assert_eq!(DataFormat::of::<f32>(be).to_string(), "rf32_be");
         assert_eq!(DataFormat::of::<Complex<i16>>(be).to_string(), "ci16_be");
         assert_eq!(DataFormat::of::<i8>(be).to_string(), "ri8");
@@ -980,7 +980,7 @@ mod write_path {
     #[test]
     fn every_sample_type_writes_exactly_the_width_it_declares() {
         fn check<S: Sample>(dir: &TempDir, sample: S, label: &str) {
-            let declared = DataFormat::of::<S>(Endianess::LittleEndian).size();
+            let declared = DataFormat::of::<S>(Endianness::LittleEndian).size();
             assert_eq!(
                 declared as usize,
                 std::mem::size_of::<S>(),
@@ -1169,7 +1169,7 @@ mod read_path {
             .to_file_with(
                 &basename,
                 &samples,
-                WriteOptions::default().endianness(Endianess::BigEndian),
+                WriteOptions::default().endianness(Endianness::BigEndian),
             )
             .expect("writing must succeed");
 
@@ -1233,7 +1233,7 @@ mod read_path {
         metadata.global.metadata_only = Some(true);
         fs::write(
             sibling(&basename, ".sigmf-meta"),
-            metadata.to_str().expect("serialize"),
+            metadata.to_json().expect("serialize"),
         )
         .expect("rewriting the sidecar");
 
@@ -1270,7 +1270,7 @@ mod read_path {
         metadata.global.dataset = Some("../elsewhere/secrets.bin".to_string());
         fs::write(
             sibling(&basename, ".sigmf-meta"),
-            metadata.to_str().expect("serialize"),
+            metadata.to_json().expect("serialize"),
         )
         .expect("rewriting the sidecar");
 
@@ -1300,7 +1300,7 @@ mod read_path {
         let mut metadata = a_dsc_watch_recording("cf32_le").metadata;
         metadata.global.dataset = Some("capture.iq".to_string());
         let sidecar = dir.path().join("dsc_watch.sigmf-meta");
-        fs::write(&sidecar, metadata.to_str().expect("serialize")).expect("writing the sidecar");
+        fs::write(&sidecar, metadata.to_json().expect("serialize")).expect("writing the sidecar");
 
         let reopened = SigMF::from_file(&sidecar).expect("an NCD recording must open");
         assert_eq!(

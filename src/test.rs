@@ -143,7 +143,7 @@ fn test_parse_roundtrip() -> Result<(), Box<dyn Error>> {
   ]
 }"#;
     let metadata = Metadata::from_json(json_data)?;
-    assert_eq!(metadata.to_str()?, json_data);
+    assert_eq!(metadata.to_json()?, json_data);
     Ok(())
 }
 
@@ -191,7 +191,7 @@ fn test_parse_roundtrip_with_extention() -> Result<(), Box<dyn Error>> {
     antenna.antenna_type = None;
     metadata.global.set_extension(antenna)?;
 
-    assert_eq!(metadata.to_str()?, json_expected);
+    assert_eq!(metadata.to_json()?, json_expected);
     Ok(())
 }
 
@@ -240,9 +240,9 @@ fn test_parse_roundtrip_with_extention_removal() -> Result<(), Box<dyn Error>> {
 }"#;
     let mut metadata = Metadata::from_json(json_data)?;
 
-    metadata.global.delete_extension::<AntennaGlobal>()?;
+    metadata.global.delete_extension::<AntennaGlobal>();
 
-    assert_eq!(metadata.to_str()?, json_expected);
+    assert_eq!(metadata.to_json()?, json_expected);
     Ok(())
 }
 
@@ -270,7 +270,7 @@ fn deleting_an_extension_undeclares_only_that_extension() -> Result<(), Box<dyn 
     }"#;
     let mut metadata = Metadata::from_json(json_data)?;
 
-    metadata.global.delete_extension::<AntennaGlobal>()?;
+    metadata.global.delete_extension::<AntennaGlobal>();
 
     assert_eq!(
         metadata.global.extensions,
@@ -306,18 +306,18 @@ mod data_format {
         let mut out = Vec::new();
         for number_type in [NumberType::Real, NumberType::Complex] {
             for data_type in [
-                DataType::F32(Endianess::LittleEndian),
-                DataType::F32(Endianess::BigEndian),
-                DataType::F64(Endianess::LittleEndian),
-                DataType::F64(Endianess::BigEndian),
-                DataType::I32(Endianess::LittleEndian),
-                DataType::I32(Endianess::BigEndian),
-                DataType::I16(Endianess::LittleEndian),
-                DataType::I16(Endianess::BigEndian),
-                DataType::U32(Endianess::LittleEndian),
-                DataType::U32(Endianess::BigEndian),
-                DataType::U16(Endianess::LittleEndian),
-                DataType::U16(Endianess::BigEndian),
+                DataType::F32(Endianness::LittleEndian),
+                DataType::F32(Endianness::BigEndian),
+                DataType::F64(Endianness::LittleEndian),
+                DataType::F64(Endianness::BigEndian),
+                DataType::I32(Endianness::LittleEndian),
+                DataType::I32(Endianness::BigEndian),
+                DataType::I16(Endianness::LittleEndian),
+                DataType::I16(Endianness::BigEndian),
+                DataType::U32(Endianness::LittleEndian),
+                DataType::U32(Endianness::BigEndian),
+                DataType::U16(Endianness::LittleEndian),
+                DataType::U16(Endianness::BigEndian),
                 DataType::I8,
                 DataType::U8,
             ] {
@@ -336,14 +336,14 @@ mod data_format {
             "cf32_le".parse::<DataFormat>().unwrap(),
             DataFormat {
                 number_type: NumberType::Complex,
-                data_type: DataType::F32(Endianess::LittleEndian),
+                data_type: DataType::F32(Endianness::LittleEndian),
             }
         );
         assert_eq!(
             "ru16_be".parse::<DataFormat>().unwrap(),
             DataFormat {
                 number_type: NumberType::Real,
-                data_type: DataType::U16(Endianess::BigEndian),
+                data_type: DataType::U16(Endianness::BigEndian),
             }
         );
         assert_eq!(

@@ -1,3 +1,10 @@
+// A library that parses documents from anywhere and indexes into buffers by
+// offsets those documents chose is exactly the kind that should not be able to
+// reach for `unsafe` -- and this one has never needed it. `forbid` rather than
+// `deny` so that the guarantee cannot be turned off locally by the module that
+// most wants to.
+#![forbid(unsafe_code)]
+
 /// The complex-number type this crate's sample vocabulary is built on.
 ///
 /// Re-exported because it is a *public* dependency: `Sample` is implemented for
@@ -8,16 +15,37 @@
 /// makes that impossible to get wrong.
 pub use num_complex;
 
-const SIGMF_ARCHIVE_EXT: &'static str = ".sigmf";
-const SIGMF_METADATA_EXT: &'static str = ".sigmf-meta";
-const SIGMF_DATASET_EXT: &'static str = ".sigmf-data";
-const SIGMF_COLLECTION_EXT: &'static str = ".sigmf-collection";
+/// The extension of a Recording's Metadata file, dot included.
+///
+/// Public because a caller naming or looking for Recordings needs the same string
+/// this crate matches on, and one that hardcodes `".sigmf-meta"` for itself is free
+/// to drift from us without either of us noticing.
+pub const SIGMF_METADATA_EXT: &str = ".sigmf-meta";
 
-pub mod sigmf {
+/// The extension of a compliant Recording's Dataset file, dot included.
+///
+/// A Non-Conforming Dataset is named by `core:dataset` instead and need not use
+/// this.
+pub const SIGMF_DATASET_EXT: &str = ".sigmf-data";
+
+// `.sigmf` (an Archive) and `.sigmf-collection` (a Collection) sat here too, unread
+// by any code path for the crate's whole life. Deleted rather than silenced with an
+// `#[allow(dead_code)]`: this crate supports neither format, so exporting the names
+// would advertise what it cannot do, and keeping them private kept two string
+// literals nothing could reach. They are two lines in the specification, and git
+// remembers the spelling.
+
+/// Every public item, which the crate root re-exports.
+///
+/// Private as of 0.2.0. Until then this module was public and was the only way to
+/// name a type in this crate, so every caller wrote its name twice over — and a
+/// name repeated is not a namespace, it is a stutter. The module survives its own
+/// privacy because deleting it would re-indent sixteen hundred lines and bury a
+/// release's worth of real changes in whitespace.
+mod sigmf {
     use crate::{SIGMF_DATASET_EXT, SIGMF_METADATA_EXT};
     use core::fmt::Debug;
     use num_complex::Complex;
-    use serde_json::de::Read;
     use serde_json::Value;
     use sha2::{Digest, Sha512};
     use std::collections::BTreeMap as Map;
@@ -25,7 +53,6 @@ pub mod sigmf {
     use std::fmt::{self, Write as _};
     use std::ops::Range;
     use std::{
-        error::Error,
         fs,
         path::{Path, PathBuf},
     };
@@ -49,21 +76,23 @@ pub mod sigmf {
     impl SigMF {
         /// Open a Recording, given the path of its `.sigmf-meta` file.
         ///
-        /// The Dataset is not read here, or even opened — only its path is worked
-        /// out, by the rules in [`dataset_path`]. Reading the metadata of a
-        /// hundred-gigabyte Recording therefore costs the size of its sidecar, and
-        /// [`samples`](Self::samples) is the call that goes to disk for the rest.
+        /// The Dataset is not read here, or even opened. Only its name is worked
+        /// out: `core:metadata_only` means there is none, `core:dataset` names it
+        /// outright, and otherwise it is the sibling `<basename>.sigmf-data`.
+        /// Opening the metadata of a hundred-gigabyte Recording therefore costs the
+        /// size of its sidecar, and [`samples`](Self::samples) is the call that goes
+        /// to disk for the rest.
         ///
         /// # Errors
         ///
-        /// Returns an I/O error if the Metadata file cannot be read, a
-        /// deserialization error if it is not a valid SigMF document — which
-        /// includes a `core:datatype` that describes no possible bytes — or
+        /// [`Error::Io`] if the Metadata file cannot be read, [`Error::Json`] if it
+        /// is not a valid SigMF document — which includes a `core:datatype` that
+        /// describes no possible bytes — or
         /// [`MetadataError::DatasetPathEscapesDirectory`] if `core:dataset` names
         /// something other than a file beside the Metadata file.
-        pub fn from_file<T: AsRef<Path>>(path: T) -> Result<Self, Box<dyn Error>> {
+        pub fn from_file<T: AsRef<Path>>(path: T) -> Result<Self, Error> {
             let path = path.as_ref();
-            let metadata_file = fs::File::open(path)?;
+            let metadata_file = fs::File::open(path).map_err(at(path))?;
             let metadata: Metadata = serde_json::from_reader(metadata_file)?;
             let datafile = dataset_path(path, &metadata)?;
             Ok(Self { metadata, datafile })
@@ -78,12 +107,12 @@ pub mod sigmf {
         /// # Errors
         ///
         /// Returns [`MetadataError::NoDataset`] if the Recording has no Dataset to
-        /// measure, an I/O error if it cannot be measured, or
+        /// measure, [`Error::Io`] if it cannot be measured, or
         /// [`MetadataError::CaptureOutOfBounds`] if the Metadata describes bytes
         /// the Dataset does not have.
-        pub fn capture_boundaries(&self) -> Result<Vec<Range<u64>>, Box<dyn Error>> {
+        pub fn capture_boundaries(&self) -> Result<Vec<Range<u64>>, Error> {
             let path = self.datafile.as_ref().ok_or(MetadataError::NoDataset)?;
-            let dataset_len = fs::metadata(path)?.len();
+            let dataset_len = fs::metadata(path).map_err(at(path))?.len();
             Ok(self.metadata.capture_boundaries(dataset_len)?)
         }
 
@@ -114,20 +143,21 @@ pub mod sigmf {
         /// interleaved across channels and a flat `Vec<S>` would misrepresent them,
         /// [`MetadataError::NoDataset`] if there is no Dataset to read,
         /// [`MetadataError::PartialSample`] if a segment's bytes are not a whole
-        /// number of samples, or an I/O error.
-        pub fn samples<S: Sample>(&self) -> Result<Vec<S>, Box<dyn Error>> {
+        /// number of samples, or [`Error::Io`].
+        pub fn samples<S: Sample>(&self) -> Result<Vec<S>, Error> {
             let datatype = self.metadata.global.datatype;
 
             // A one-byte component has no byte order, so for `ri8`/`ru8` the
             // argument here cannot change the answer; for every other type the
             // stored order is the only one that could possibly match.
-            let endianness = datatype.endianness().unwrap_or(Endianess::LittleEndian);
+            let endianness = datatype.endianness().unwrap_or(Endianness::LittleEndian);
             let requested = DataFormat::of::<S>(endianness);
             if requested != datatype {
-                return Err(Box::new(MetadataError::DatatypeMismatch {
+                return Err(MetadataError::DatatypeMismatch {
                     stored: datatype,
                     requested,
-                }));
+                }
+                .into());
             }
 
             // The mirror of `to_file_with`'s refusal, and for the same reason: with
@@ -136,12 +166,12 @@ pub mod sigmf {
             // which. Deinterleaving wants a return type that admits channels exist.
             if let Some(channels) = self.metadata.global.num_channels {
                 if channels != 1 {
-                    return Err(Box::new(MetadataError::MultiChannelDataset(channels)));
+                    return Err(MetadataError::MultiChannelDataset(channels).into());
                 }
             }
 
             let path = self.datafile.as_ref().ok_or(MetadataError::NoDataset)?;
-            let data = fs::read(path)?;
+            let data = fs::read(path).map_err(at(path))?;
             let boundaries = self.metadata.capture_boundaries(data.len() as u64)?;
 
             let sample_size = datatype.size() as usize;
@@ -153,10 +183,11 @@ pub mod sigmf {
                 let bytes = &data[range.start as usize..range.end as usize];
                 let whole_samples = bytes.chunks_exact(sample_size);
                 if !whole_samples.remainder().is_empty() {
-                    return Err(Box::new(MetadataError::PartialSample {
+                    return Err(MetadataError::PartialSample {
                         bytes: bytes.len() as u64,
                         datatype,
-                    }));
+                    }
+                    .into());
                 }
                 samples.extend(whole_samples.map(|sample| S::decode(endianness, sample)));
             }
@@ -183,7 +214,7 @@ pub mod sigmf {
             &mut self,
             basename: P,
             samples: &[S],
-        ) -> Result<(), Box<dyn Error>> {
+        ) -> Result<(), Error> {
             self.to_file_with(basename, samples, WriteOptions::default())
         }
 
@@ -217,20 +248,20 @@ pub mod sigmf {
         ///
         /// Returns [`MetadataError::MultiChannelDataset`] if `core:num_channels` is
         /// set to anything but 1 (see the SigMF specification's advice to use
-        /// Collections instead), or an I/O error if either file cannot be written.
+        /// Collections instead), or [`Error::Io`] if either file cannot be written.
         pub fn to_file_with<S: Sample, P: AsRef<Path>>(
             &mut self,
             basename: P,
             samples: &[S],
             options: WriteOptions,
-        ) -> Result<(), Box<dyn Error>> {
+        ) -> Result<(), Error> {
             // A `&[S]` is one channel by construction: nothing in the slice can say
             // where one channel ends and the next begins, so honouring
             // `core:num_channels > 1` would mean writing a datatype that describes
             // something other than the bytes.
             if let Some(channels) = self.metadata.global.num_channels {
                 if channels != 1 {
-                    return Err(Box::new(MetadataError::MultiChannelDataset(channels)));
+                    return Err(MetadataError::MultiChannelDataset(channels).into());
                 }
             }
 
@@ -247,8 +278,8 @@ pub mod sigmf {
             let data_path = append_extension(basename.as_ref(), SIGMF_DATASET_EXT);
             let metadata_path = append_extension(basename.as_ref(), SIGMF_METADATA_EXT);
 
-            fs::write(&data_path, &data)?;
-            fs::write(&metadata_path, self.metadata.to_str()?)?;
+            fs::write(&data_path, &data).map_err(at(&data_path))?;
+            fs::write(&metadata_path, self.metadata.to_json()?).map_err(at(&metadata_path))?;
 
             self.datafile = Some(data_path);
             Ok(())
@@ -332,6 +363,34 @@ pub mod sigmf {
         hex
     }
 
+    /// Names the file an [`std::io::Error`] happened to, on its way into [`Error`].
+    ///
+    /// Spelled to be used as `fs::read(path).map_err(at(path))?`. A bare
+    /// `std::io::Error` carries no path — "No such file or directory" is the whole
+    /// message — and a Recording is two files, so an error without one leaves the
+    /// caller unable to tell which half is missing. Taking the path as an argument
+    /// rather than deriving it from a `#[from]` is what makes that impossible to
+    /// forget: there is no conversion for `?` to reach for.
+    fn at(path: &Path) -> impl FnOnce(std::io::Error) -> Error + '_ {
+        move |source| Error::Io {
+            path: path.to_path_buf(),
+            source,
+        }
+    }
+
+    /// What a JSON value is, in the specification's own vocabulary, for an error
+    /// message that has to tell a caller what they handed over.
+    fn json_type_name(value: &Value) -> &'static str {
+        match value {
+            Value::Null => "null",
+            Value::Bool(_) => "boolean",
+            Value::Number(_) => "number",
+            Value::String(_) => "string",
+            Value::Array(_) => "array",
+            Value::Object(_) => "object",
+        }
+    }
+
     /// The knobs [`SigMF::to_file_with`] turns, with sane values from [`Default`].
     ///
     /// Both defaults are safe to take blind, and it is worth saying why, because
@@ -341,7 +400,7 @@ pub mod sigmf {
     /// makes one inconvenient to a reader that wanted the other order.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct WriteOptions {
-        endianness: Endianess,
+        endianness: Endianness,
         checksum: bool,
     }
 
@@ -354,7 +413,7 @@ pub mod sigmf {
         /// hope about — and the hash costs one pass over a buffer already in hand.
         fn default() -> Self {
             Self {
-                endianness: Endianess::LittleEndian,
+                endianness: Endianness::LittleEndian,
                 checksum: true,
             }
         }
@@ -362,7 +421,7 @@ pub mod sigmf {
 
     impl WriteOptions {
         /// Write samples in this byte order, and say so in `core:datatype`.
-        pub fn endianness(mut self, endianness: Endianess) -> Self {
+        pub fn endianness(mut self, endianness: Endianness) -> Self {
             self.endianness = endianness;
             self
         }
@@ -392,13 +451,29 @@ pub mod sigmf {
         /// that it could compute capture boundaries on the way past; that is now
         /// [`capture_boundaries`](Self::capture_boundaries)' job, which asks only
         /// for a length.
-        pub fn from_json(s: &str) -> Result<Self, Box<dyn Error>> {
-            Ok(serde_json::from_str(s)?)
+        ///
+        /// # Errors
+        ///
+        /// Every way a document can be rejected — malformed JSON, a missing
+        /// `core:datatype`, a `core:datatype` that describes no possible bytes —
+        /// surfaces as a [`serde_json::Error`], because deserialization is where all
+        /// of them are caught. The error type says so rather than widening to
+        /// [`Error`], which would offer the caller an [`Error::Io`] this function
+        /// cannot produce. It converts into [`Error`] for callers who want the one
+        /// type.
+        pub fn from_json(s: &str) -> Result<Self, serde_json::Error> {
+            serde_json::from_str(s)
         }
 
-        pub fn to_str(&self) -> Result<String, Box<dyn Error>> {
-            let res = serde_json::to_string_pretty(self)?;
-            Ok(res)
+        /// Serialize to a `.sigmf-meta` document, pretty-printed.
+        ///
+        /// The inverse of [`from_json`](Self::from_json), and named to say so. This
+        /// was `to_str`, which the Rust API guidelines spend on a *cheap, borrowing*
+        /// conversion — [`std::ffi::OsStr::to_str`] hands back a `&str` and never
+        /// allocates. This allocates a whole document, and the guidelines' name for
+        /// that is `to_`-something-that-says-what.
+        pub fn to_json(&self) -> Result<String, serde_json::Error> {
+            serde_json::to_string_pretty(self)
         }
 
         /// Where each Captures segment's samples sit in a Dataset `dataset_len`
@@ -434,12 +509,12 @@ pub mod sigmf {
             dataset_len: u64,
         ) -> Result<Vec<Range<u64>>, MetadataError> {
             let trailing = self.global.trailing_bytes.unwrap_or(0);
-            let last_sample_byte = dataset_len.checked_sub(trailing).ok_or_else(|| {
-                MetadataError::Internal(format!(
-                    "`core:trailing_bytes` is {trailing}, but the Dataset is only \
-                     {dataset_len} bytes long",
-                ))
-            })?;
+            let last_sample_byte = dataset_len.checked_sub(trailing).ok_or(
+                MetadataError::TrailingBytesExceedDataset {
+                    trailing,
+                    dataset_len,
+                },
+            )?;
 
             if self.captures.is_empty() {
                 // Spelled `once` rather than `vec![0..last_sample_byte]`, which reads
@@ -464,15 +539,13 @@ pub mod sigmf {
                 // Checked, not wrapping: `core:sample_start` is a `u64` from a file,
                 // and a release build would otherwise answer a sample index near
                 // `u64::MAX` with a small, plausible, wrong byte offset.
-                let byte_of = |sample: u64| -> Result<u64, MetadataError> {
+                let byte_of = |sample_start: u64| -> Result<u64, MetadataError> {
                     sample_size
-                        .checked_mul(sample)
+                        .checked_mul(sample_start)
                         .and_then(|offset| offset.checked_add(headers))
-                        .ok_or_else(|| {
-                            MetadataError::Internal(format!(
-                                "capture {index}: `core:sample_start` {sample} is further into \
-                                 the Dataset than a byte offset can reach",
-                            ))
+                        .ok_or(MetadataError::SampleStartOutOfRange {
+                            index,
+                            sample_start,
                         })
                 };
 
@@ -700,7 +773,7 @@ pub mod sigmf {
     /// # Examples
     ///
     /// ```
-    /// use sigmf::sigmf::Geolocation;
+    /// use sigmf::Geolocation;
     ///
     /// // Walvis Bay: 14.5° east, 22.96° south, 7 m above the ellipsoid.
     /// let heard_at = Geolocation {
@@ -980,7 +1053,7 @@ pub mod sigmf {
 
     impl GlobalExtension for AntennaGlobal {
         fn namespace() -> String {
-            return "antenna".to_string();
+            "antenna".to_string()
         }
 
         /// The version upstream's `extensions/antenna-schema.json` records in its
@@ -990,17 +1063,82 @@ pub mod sigmf {
         }
     }
 
-    #[derive(Debug)]
-    pub enum MetadataError {
-        Internal(String),
-        Serde(serde_json::Error),
+    /// Anything that can go wrong opening, reading, or writing a Recording's files.
+    ///
+    /// The split from [`MetadataError`] follows the one the API already makes: a
+    /// method that touches the filesystem returns this, and a method that only does
+    /// arithmetic on a document returns [`MetadataError`]. Widening one type over
+    /// both would put an `Io` variant in the return type of
+    /// [`Metadata::capture_boundaries`], which reads no files and could never
+    /// produce one — the same "field that can only ever hold a default" this crate
+    /// spent a version removing, wearing an enum instead of a struct.
+    ///
+    /// [`MetadataError`] converts into this, so `?` carries either out of a method
+    /// returning `Error`.
+    #[derive(Debug, thiserror::Error)]
+    #[non_exhaustive]
+    pub enum Error {
+        /// A file could not be opened, read, or written.
+        ///
+        /// The path is carried because [`std::io::Error`] has none of its own — "No
+        /// such file or directory" is its whole message — and because the caller
+        /// frequently does not have one either. Only [`SigMF::from_file`] touches a
+        /// file the caller named; the Dataset is *derived* from the Metadata file's
+        /// name, and [`SigMF::to_file`] derives both of its files from a basename.
+        /// An error from any of those without a path names nothing the caller could
+        /// look up.
+        #[error("{path}: {source}", path = path.display())]
+        Io {
+            /// The file the operation was attempted on.
+            path: PathBuf,
+            /// What the operating system said.
+            source: std::io::Error,
+        },
 
+        /// A Metadata document could not be parsed, or could not be serialized.
+        ///
+        /// This carries no path where [`Error::Io`] does, and the asymmetry is the
+        /// point rather than an oversight: the only document this crate parses out
+        /// of a file is the one [`SigMF::from_file`] was handed, so a caller holding
+        /// a parse error is already holding the path it belongs to. The rest come
+        /// from [`Metadata::from_json`] and [`Metadata::to_json`], which take and
+        /// return a `String` and never learn of a file at all. `serde_json`'s own
+        /// message carries the line and column, which is the part that is genuinely
+        /// hard to recover at the call site.
+        #[error(transparent)]
+        Json(#[from] serde_json::Error),
+
+        /// The Metadata is not a description of the Dataset that was asked for.
+        #[error(transparent)]
+        Metadata(#[from] MetadataError),
+    }
+
+    /// A Metadata document says something that does not work.
+    ///
+    /// Every variant here is a statement about a document's *contents* — either
+    /// self-contradictory, or contradicting a Dataset, or contradicting what the
+    /// caller asked for. Nothing here reads a file; see [`Error`] for that.
+    #[derive(Debug, thiserror::Error)]
+    #[non_exhaustive]
+    pub enum MetadataError {
         /// A Recording declaring `core:num_channels` other than 1 met the typed
         /// sample API, which has no way to express it in either direction.
+        #[error(
+            "cannot use a typed sample buffer for a Dataset with `core:num_channels` = {0}: \
+             such a buffer is one channel, and interleaving several into it would leave \
+             `core:datatype` describing something other than the bytes. The specification \
+             recommends SigMF Collections over `core:num_channels` for multi-channel IQ, \
+             for widest application support"
+        )]
         MultiChannelDataset(u64),
 
         /// A Dataset was asked for as a Rust type that its `core:datatype` does not
         /// describe.
+        #[error(
+            "cannot read a `{stored}` Dataset as `{requested}`: `core:datatype` is the \
+             Recording's own account of what its bytes mean, and reading them as anything \
+             else yields plausible noise rather than an error"
+        )]
         DatatypeMismatch {
             /// What the Recording says its samples are.
             stored: DataFormat,
@@ -1009,9 +1147,20 @@ pub mod sigmf {
         },
 
         /// The samples of a Recording that has no Dataset file were asked for.
+        #[error(
+            "this Recording has no Dataset file: it is either `core:metadata_only`, or its \
+             Metadata file is not named `<basename>.sigmf-meta` and so has no Dataset that \
+             can be named from it, or it has not been written yet"
+        )]
         NoDataset,
 
         /// A Captures segment describes bytes the Dataset does not have.
+        #[error(
+            "capture {index} covers bytes {start}..{end} of a Dataset that is {dataset_len} \
+             bytes long. The specification requires `captures` to be sorted by \
+             `core:sample_start` ascending; a Recording whose segments are not sorted lands \
+             here too"
+        )]
         CaptureOutOfBounds {
             /// Position of the offending segment in the `captures` array.
             index: usize,
@@ -1025,76 +1174,80 @@ pub mod sigmf {
 
         /// `core:dataset` names something other than a file beside the Metadata
         /// file.
+        #[error(
+            "`core:dataset` is {0:?}, which is not a plain filename. The specification says \
+             this field \"only includes the filename, not directory\", and the Dataset \
+             \"must be in the same directory as the .sigmf-meta file\""
+        )]
         DatasetPathEscapesDirectory(String),
 
         /// A Captures segment's bytes are not a whole number of samples.
+        #[error(
+            "a capture holds {bytes} bytes, which is not a whole number of `{datatype}` \
+             samples of {} bytes each", datatype.size()
+        )]
         PartialSample {
             /// Length of the segment.
             bytes: u64,
             /// The format whose sample width does not divide it.
             datatype: DataFormat,
         },
-    }
 
-    impl fmt::Display for MetadataError {
-        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            match self {
-                MetadataError::Internal(err_msg) => {
-                    write!(f, "Internal error: {}", err_msg)
-                }
-                MetadataError::Serde(e) => <&serde_json::Error as std::fmt::Display>::fmt(&e, f),
-                MetadataError::MultiChannelDataset(channels) => write!(
-                    f,
-                    "cannot use a typed sample buffer for a Dataset with `core:num_channels` \
-                     = {channels}: such a buffer is one channel, and interleaving several \
-                     into it would leave `core:datatype` describing something other than \
-                     the bytes. The specification recommends SigMF Collections over \
-                     `core:num_channels` for multi-channel IQ, for widest application support",
-                ),
-                MetadataError::DatatypeMismatch { stored, requested } => write!(
-                    f,
-                    "cannot read a `{stored}` Dataset as `{requested}`: `core:datatype` is \
-                     the Recording's own account of what its bytes mean, and reading them \
-                     as anything else yields plausible noise rather than an error",
-                ),
-                MetadataError::NoDataset => f.write_str(
-                    "this Recording has no Dataset file: it is either `core:metadata_only`, \
-                     or its Metadata file is not named `<basename>.sigmf-meta` and so has no \
-                     Dataset that can be named from it, or it has not been written yet",
-                ),
-                MetadataError::CaptureOutOfBounds {
-                    index,
-                    start,
-                    end,
-                    dataset_len,
-                } => write!(
-                    f,
-                    "capture {index} covers bytes {start}..{end} of a Dataset that is \
-                     {dataset_len} bytes long. The specification requires `captures` to be \
-                     sorted by `core:sample_start` ascending; a Recording whose segments are \
-                     not sorted lands here too",
-                ),
-                MetadataError::DatasetPathEscapesDirectory(name) => write!(
-                    f,
-                    "`core:dataset` is {name:?}, which is not a plain filename. The \
-                     specification says this field \"only includes the filename, not \
-                     directory\", and the Dataset \"must be in the same directory as the \
-                     .sigmf-meta file\"",
-                ),
-                MetadataError::PartialSample { bytes, datatype } => write!(
-                    f,
-                    "a capture holds {bytes} bytes, which is not a whole number of \
-                     `{datatype}` samples of {} bytes each",
-                    datatype.size(),
-                ),
-            }
-        }
-    }
+        /// `core:trailing_bytes` claims more of the Dataset than the Dataset has.
+        #[error(
+            "`core:trailing_bytes` is {trailing}, but the Dataset is only {dataset_len} \
+             bytes long, so there are no sample bytes in front of them"
+        )]
+        TrailingBytesExceedDataset {
+            /// What `core:trailing_bytes` says is not sample data.
+            trailing: u64,
+            /// Size of the whole Dataset.
+            dataset_len: u64,
+        },
 
-    impl Error for MetadataError {
-        fn source(&self) -> Option<&(dyn Error + 'static)> {
-            None
-        }
+        /// A `core:sample_start` is too far into the Dataset to be a byte offset.
+        ///
+        /// A sample index near [`u64::MAX`] names a byte past the end of the
+        /// addressable file. No Dataset is that large; a document saying otherwise
+        /// is corrupt or hostile, and the alternative to this error is a release
+        /// build wrapping the multiplication and answering with a small, plausible,
+        /// wrong offset.
+        #[error(
+            "capture {index}: `core:sample_start` {sample_start} is further into the Dataset \
+             than a byte offset can reach"
+        )]
+        SampleStartOutOfRange {
+            /// Position of the offending segment in the `captures` array.
+            index: usize,
+            /// The sample index that cannot be converted to a byte offset.
+            sample_start: u64,
+        },
+
+        /// An extension type could not be serialized into the Global object.
+        #[error("extension data for the `{namespace}` namespace could not be serialized")]
+        ExtensionNotSerializable {
+            /// The namespace the type declared.
+            namespace: String,
+            /// Why `serde_json` refused it.
+            source: serde_json::Error,
+        },
+
+        /// An extension type serialized to something other than a JSON object.
+        ///
+        /// Extension data is a set of `namespace:key` fields merged into the Global
+        /// object, so a type that serializes to an array, a string, or a number has
+        /// no fields to merge and no key to merge them under.
+        #[error(
+            "extension data for the `{namespace}` namespace serialized to a JSON {found}, \
+             but the Global object can only be extended with named fields, so an extension \
+             must serialize to an object"
+        )]
+        ExtensionNotAnObject {
+            /// The namespace the type declared.
+            namespace: String,
+            /// What it serialized to instead, named as JSON names it.
+            found: &'static str,
+        },
     }
 
     impl GlobalMetadata {
@@ -1110,12 +1263,12 @@ pub mod sigmf {
         /// # Examples
         ///
         /// ```
-        /// use sigmf::sigmf::GlobalMetadata;
+        /// use sigmf::GlobalMetadata;
         ///
         /// let global = GlobalMetadata::new("cf32_le".parse()?);
         /// assert_eq!(global.datatype.to_string(), "cf32_le");
-        /// assert_eq!(global.version, sigmf::sigmf::SIGMF_VERSION);
-        /// # Ok::<(), sigmf::sigmf::ParseDataFormatError>(())
+        /// assert_eq!(global.version, sigmf::SIGMF_VERSION);
+        /// # Ok::<(), sigmf::ParseDataFormatError>(())
         /// ```
         pub fn new(datatype: DataFormat) -> GlobalMetadata {
             GlobalMetadata {
@@ -1176,7 +1329,7 @@ pub mod sigmf {
         /// # Examples
         ///
         /// ```
-        /// use sigmf::sigmf::{AntennaGlobal, GlobalMetadata};
+        /// use sigmf::{AntennaGlobal, GlobalMetadata};
         ///
         /// let mut global = GlobalMetadata::new("cf32_le".parse()?);
         /// global.set_extension(AntennaGlobal {
@@ -1192,22 +1345,26 @@ pub mod sigmf {
             &mut self,
             val: T,
         ) -> Result<(), MetadataError> {
-            match serde_json::to_value(val) {
-                Ok(serialized) => match serialized {
-                    Value::Object(d) => {
-                        let namespace_pattern = T::namespace() + ":";
-                        self.other
-                            .retain(|k, _| !k.starts_with(namespace_pattern.as_str()));
-                        self.other.extend(d);
-                        self.declare_extension::<T>();
-                        Ok(())
-                    }
-                    _ => Err(MetadataError::Internal(
-                        "unknown serialized message type".to_string(),
-                    )),
-                },
-                Err(e) => Err(MetadataError::Serde(e)),
-            }
+            let serialized = serde_json::to_value(val).map_err(|source| {
+                MetadataError::ExtensionNotSerializable {
+                    namespace: T::namespace(),
+                    source,
+                }
+            })?;
+
+            let Value::Object(fields) = serialized else {
+                return Err(MetadataError::ExtensionNotAnObject {
+                    namespace: T::namespace(),
+                    found: json_type_name(&serialized),
+                });
+            };
+
+            let namespace_pattern = T::namespace() + ":";
+            self.other
+                .retain(|k, _| !k.starts_with(namespace_pattern.as_str()));
+            self.other.extend(fields);
+            self.declare_extension::<T>();
+            Ok(())
         }
 
         /// Record `T`'s namespace in `core:extensions`, replacing any existing
@@ -1232,7 +1389,13 @@ pub mod sigmf {
         /// The declaration goes with the data: leaving it behind would announce an
         /// extension the Recording no longer uses, which for a non-`optional` one
         /// tells a reader to refuse a file it could in fact parse.
-        pub fn delete_extension<T: GlobalExtension>(&mut self) -> Result<(), MetadataError> {
+        ///
+        /// Removing a namespace that was never present is not an error, and neither
+        /// is anything else: this returns nothing because it cannot fail. It used to
+        /// return `Result<(), MetadataError>` with a single `Ok(())` exit and no
+        /// fallible call in the body — a `?` at every call site, standing guard over
+        /// an error that had no way to exist.
+        pub fn delete_extension<T: GlobalExtension>(&mut self) {
             let namespace_pattern = T::namespace() + ":";
             self.other
                 .retain(|k, _| !k.starts_with(namespace_pattern.as_str()));
@@ -1240,7 +1403,6 @@ pub mod sigmf {
             if let Some(declared) = &mut self.extensions {
                 declared.retain(|e| e.name != T::namespace());
             }
-            Ok(())
         }
     }
 
@@ -1250,19 +1412,19 @@ pub mod sigmf {
     /// byte order to state, and the specification's datatype grammar reflects that
     /// by omitting the suffix for `i8` and `u8`.
     #[derive(Debug, PartialEq, Eq, Clone, Copy)]
-    pub enum Endianess {
+    pub enum Endianness {
         /// Most significant byte first, spelled `_be`.
         BigEndian,
         /// Least significant byte first, spelled `_le`.
         LittleEndian,
     }
 
-    impl Endianess {
+    impl Endianness {
         /// The suffix this byte order is spelled with in a datatype string.
         fn suffix(self) -> &'static str {
             match self {
-                Endianess::BigEndian => "_be",
-                Endianess::LittleEndian => "_le",
+                Endianness::BigEndian => "_be",
+                Endianness::LittleEndian => "_le",
             }
         }
     }
@@ -1279,17 +1441,17 @@ pub mod sigmf {
     #[derive(Debug, PartialEq, Eq, Clone, Copy)]
     pub enum DataType {
         /// 32-bit IEEE-754 float, spelled `f32_le` or `f32_be`.
-        F32(Endianess),
+        F32(Endianness),
         /// 64-bit IEEE-754 float, spelled `f64_le` or `f64_be`.
-        F64(Endianess),
+        F64(Endianness),
         /// Signed 32-bit integer, spelled `i32_le` or `i32_be`.
-        I32(Endianess),
+        I32(Endianness),
         /// Signed 16-bit integer, spelled `i16_le` or `i16_be`.
-        I16(Endianess),
+        I16(Endianness),
         /// Unsigned 32-bit integer, spelled `u32_le` or `u32_be`.
-        U32(Endianess),
+        U32(Endianness),
         /// Unsigned 16-bit integer, spelled `u16_le` or `u16_be`.
-        U16(Endianess),
+        U16(Endianness),
         /// Signed 8-bit integer, spelled `i8`.
         I8,
         /// Unsigned 8-bit integer, spelled `u8`.
@@ -1356,18 +1518,18 @@ pub mod sigmf {
     /// # Examples
     ///
     /// ```
-    /// use sigmf::sigmf::{DataFormat, DataType, Endianess, NumberType};
+    /// use sigmf::{DataFormat, DataType, Endianness, NumberType};
     ///
     /// let format: DataFormat = "cf32_le".parse()?;
     /// assert_eq!(format.number_type, NumberType::Complex);
-    /// assert_eq!(format.data_type, DataType::F32(Endianess::LittleEndian));
+    /// assert_eq!(format.data_type, DataType::F32(Endianness::LittleEndian));
     ///
     /// // Complex doubles the width: two f32 components per sample.
     /// assert_eq!(format.size(), 8);
     ///
     /// // Display is the exact inverse of the parse.
     /// assert_eq!(format.to_string(), "cf32_le");
-    /// # Ok::<(), sigmf::sigmf::ParseDataFormatError>(())
+    /// # Ok::<(), sigmf::ParseDataFormatError>(())
     /// ```
     #[derive(Debug, PartialEq, Eq, Clone, Copy)]
     pub struct DataFormat {
@@ -1401,7 +1563,7 @@ pub mod sigmf {
         ///
         /// ```
         /// use sigmf::num_complex::Complex;
-        /// use sigmf::sigmf::{DataFormat, Endianess::{BigEndian, LittleEndian}};
+        /// use sigmf::{DataFormat, Endianness::{BigEndian, LittleEndian}};
         ///
         /// assert_eq!(DataFormat::of::<Complex<f32>>(LittleEndian).to_string(), "cf32_le");
         /// assert_eq!(DataFormat::of::<i16>(BigEndian).to_string(), "ri16_be");
@@ -1409,7 +1571,7 @@ pub mod sigmf {
         /// // One byte has no byte order, and the datatype does not pretend it does.
         /// assert_eq!(DataFormat::of::<u8>(BigEndian).to_string(), "ru8");
         /// ```
-        pub fn of<S: Sample>(endianness: Endianess) -> DataFormat {
+        pub fn of<S: Sample>(endianness: Endianness) -> DataFormat {
             S::data_format(endianness)
         }
 
@@ -1424,13 +1586,13 @@ pub mod sigmf {
         /// # Examples
         ///
         /// ```
-        /// use sigmf::sigmf::{DataFormat, Endianess};
+        /// use sigmf::{DataFormat, Endianness};
         ///
-        /// assert_eq!("cf32_be".parse::<DataFormat>()?.endianness(), Some(Endianess::BigEndian));
+        /// assert_eq!("cf32_be".parse::<DataFormat>()?.endianness(), Some(Endianness::BigEndian));
         /// assert_eq!("ri8".parse::<DataFormat>()?.endianness(), None);
-        /// # Ok::<(), sigmf::sigmf::ParseDataFormatError>(())
+        /// # Ok::<(), sigmf::ParseDataFormatError>(())
         /// ```
-        pub fn endianness(&self) -> Option<Endianess> {
+        pub fn endianness(&self) -> Option<Endianness> {
             match self.data_type {
                 DataType::F32(e)
                 | DataType::F64(e)
@@ -1471,7 +1633,7 @@ pub mod sigmf {
     pub trait Sample: Copy + private::Sealed {}
 
     mod private {
-        use super::{DataFormat, Endianess};
+        use super::{DataFormat, Endianness};
 
         /// What [`Sample`](super::Sample) actually provides.
         ///
@@ -1481,7 +1643,7 @@ pub mod sigmf {
         /// [`DataFormat::of`](super::DataFormat::of).
         pub trait Sealed {
             /// The `core:datatype` a Dataset of these samples carries.
-            fn data_format(endianness: Endianess) -> DataFormat;
+            fn data_format(endianness: Endianness) -> DataFormat;
 
             /// Append this sample's bytes, in `endianness`, to `out`.
             ///
@@ -1489,7 +1651,7 @@ pub mod sigmf {
             /// whole Dataset is assembled in memory before any of it is written —
             /// the samples are already in memory when they arrive, and the checksum
             /// needs a second look at them.
-            fn encode(self, endianness: Endianess, out: &mut Vec<u8>);
+            fn encode(self, endianness: Endianness, out: &mut Vec<u8>);
 
             /// Read one sample from exactly [`DataFormat::size`](super::DataFormat::size)
             /// bytes of Dataset, the inverse of [`encode`](Self::encode).
@@ -1501,7 +1663,7 @@ pub mod sigmf {
             /// # Panics
             ///
             /// If `bytes` is not exactly one sample wide.
-            fn decode(endianness: Endianess, bytes: &[u8]) -> Self;
+            fn decode(endianness: Endianness, bytes: &[u8]) -> Self;
         }
     }
 
@@ -1515,26 +1677,26 @@ pub mod sigmf {
     macro_rules! impl_sample {
         ($component:ty, $data_type:expr) => {
             impl private::Sealed for $component {
-                fn data_format(endianness: Endianess) -> DataFormat {
+                fn data_format(endianness: Endianness) -> DataFormat {
                     DataFormat {
                         number_type: NumberType::Real,
                         data_type: $data_type(endianness),
                     }
                 }
 
-                fn encode(self, endianness: Endianess, out: &mut Vec<u8>) {
+                fn encode(self, endianness: Endianness, out: &mut Vec<u8>) {
                     match endianness {
-                        Endianess::LittleEndian => out.extend_from_slice(&self.to_le_bytes()),
-                        Endianess::BigEndian => out.extend_from_slice(&self.to_be_bytes()),
+                        Endianness::LittleEndian => out.extend_from_slice(&self.to_le_bytes()),
+                        Endianness::BigEndian => out.extend_from_slice(&self.to_be_bytes()),
                     }
                 }
 
-                fn decode(endianness: Endianess, bytes: &[u8]) -> Self {
+                fn decode(endianness: Endianness, bytes: &[u8]) -> Self {
                     let mut component = [0u8; std::mem::size_of::<$component>()];
                     component.copy_from_slice(bytes);
                     match endianness {
-                        Endianess::LittleEndian => Self::from_le_bytes(component),
-                        Endianess::BigEndian => Self::from_be_bytes(component),
+                        Endianness::LittleEndian => Self::from_le_bytes(component),
+                        Endianness::BigEndian => Self::from_be_bytes(component),
                     }
                 }
             }
@@ -1542,20 +1704,20 @@ pub mod sigmf {
             impl Sample for $component {}
 
             impl private::Sealed for Complex<$component> {
-                fn data_format(endianness: Endianess) -> DataFormat {
+                fn data_format(endianness: Endianness) -> DataFormat {
                     DataFormat {
                         number_type: NumberType::Complex,
                         data_type: $data_type(endianness),
                     }
                 }
 
-                fn encode(self, endianness: Endianess, out: &mut Vec<u8>) {
+                fn encode(self, endianness: Endianness, out: &mut Vec<u8>) {
                     // In-phase then quadrature: the interleaving `c` denotes.
                     self.re.encode(endianness, out);
                     self.im.encode(endianness, out);
                 }
 
-                fn decode(endianness: Endianess, bytes: &[u8]) -> Self {
+                fn decode(endianness: Endianness, bytes: &[u8]) -> Self {
                     let (re, im) = bytes.split_at(std::mem::size_of::<$component>());
                     Complex::new(
                         <$component as private::Sealed>::decode(endianness, re),
@@ -1592,9 +1754,9 @@ pub mod sigmf {
     enum ParseDataFormatErrorKind {
         NumberType,
         SampleType,
-        MissingEndianess,
-        Endianess,
-        RedundantEndianess,
+        MissingEndianness,
+        Endianness,
+        RedundantEndianness,
     }
 
     impl fmt::Display for ParseDataFormatError {
@@ -1608,14 +1770,14 @@ pub mod sigmf {
                     "unknown sample type; the specification permits \
                      f32, f64, i32, i16, u32, u16, i8, u8",
                 ),
-                ParseDataFormatErrorKind::MissingEndianess => f.write_str(
+                ParseDataFormatErrorKind::MissingEndianness => f.write_str(
                     "a multi-byte sample type must state its byte order \
                      with an `_le` or `_be` suffix",
                 ),
-                ParseDataFormatErrorKind::Endianess => {
+                ParseDataFormatErrorKind::Endianness => {
                     f.write_str("expected a byte order suffix of `_le` or `_be`")
                 }
-                ParseDataFormatErrorKind::RedundantEndianess => f.write_str(
+                ParseDataFormatErrorKind::RedundantEndianness => f.write_str(
                     "a single-byte sample type has no byte order and must not \
                      carry an `_le` or `_be` suffix",
                 ),
@@ -1623,7 +1785,10 @@ pub mod sigmf {
         }
     }
 
-    impl Error for ParseDataFormatError {}
+    // Hand-written, and staying that way: the default `source()` of `None` is the
+    // truth here, because a datatype that does not parse has no underlying cause —
+    // the string is simply not one of twenty-eight spellings.
+    impl std::error::Error for ParseDataFormatError {}
 
     impl std::str::FromStr for DataFormat {
         type Err = ParseDataFormatError;
@@ -1666,7 +1831,7 @@ pub mod sigmf {
             let data_type = match base {
                 "i8" | "u8" => {
                     if suffix.is_some() {
-                        return Err(fail(ParseDataFormatErrorKind::RedundantEndianess));
+                        return Err(fail(ParseDataFormatErrorKind::RedundantEndianness));
                     }
                     if base == "i8" {
                         DataType::I8
@@ -1676,10 +1841,10 @@ pub mod sigmf {
                 }
                 "f32" | "f64" | "i32" | "i16" | "u32" | "u16" => {
                     let endianess = match suffix {
-                        Some("le") => Endianess::LittleEndian,
-                        Some("be") => Endianess::BigEndian,
-                        Some(_) => return Err(fail(ParseDataFormatErrorKind::Endianess)),
-                        None => return Err(fail(ParseDataFormatErrorKind::MissingEndianess)),
+                        Some("le") => Endianness::LittleEndian,
+                        Some("be") => Endianness::BigEndian,
+                        Some(_) => return Err(fail(ParseDataFormatErrorKind::Endianness)),
+                        None => return Err(fail(ParseDataFormatErrorKind::MissingEndianness)),
                     };
                     match base {
                         "f32" => DataType::F32(endianess),
@@ -1726,6 +1891,8 @@ pub mod sigmf {
         }
     }
 }
+
+pub use sigmf::*;
 
 #[cfg(test)]
 mod test;

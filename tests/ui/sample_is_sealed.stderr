@@ -1,15 +1,15 @@
-error[E0277]: the trait bound `EightByteThing: sigmf::private::Sealed` is not satisfied
+error[E0277]: the trait bound `EightByteThing: sigmf::sigmf::private::Sealed` is not satisfied
   --> tests/ui/sample_is_sealed.rs:15:17
    |
 15 | impl Sample for EightByteThing {}
    |                 ^^^^^^^^^^^^^^ unsatisfied trait bound
    |
-help: the trait `sigmf::private::Sealed` is not implemented for `EightByteThing`
+help: the trait `sigmf::sigmf::private::Sealed` is not implemented for `EightByteThing`
   --> tests/ui/sample_is_sealed.rs:11:1
    |
 11 | struct EightByteThing {
    | ^^^^^^^^^^^^^^^^^^^^^
-   = help: the following other types implement trait `sigmf::private::Sealed`:
+   = help: the following other types implement trait `sigmf::sigmf::private::Sealed`:
              f32
              f64
              i16

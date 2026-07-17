@@ -4,11 +4,26 @@ version = "0.1.1"
 authors = ["Alex Khamutov <alex.khamutov@gmail.com>"]
 edition = "2021"
 license = "MIT"
-description = "A Rust library for interacting with SigMF recordings,"
+description = "Read and write SigMF recordings: recorded radio signals, and metadata that describes them"
+repository = "https://github.com/khamutov/sigmf-rs"
+readme = "README.md"
+keywords = ["sigmf", "sdr", "radio", "iq", "dsp"]
+categories = ["encoding", "parser-implementations", "science"]
 
 [dependencies]
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.150"
+
+# Derives the error types.
+#
+# 2.x for the mirror image of sha2's reasoning below: here the current release is
+# also the one the ecosystem has already moved to, so it is the version that adds
+# nothing to a consumer's tree. A proc-macro dependency compiles at build time and
+# links nothing into the result, which is what makes it affordable for a library
+# to take at all -- it expands to the `Display` and `Error` impls we would
+# otherwise write by hand, and the hand-written `source()` is precisely what this
+# crate had wrong.
+thiserror = "2.0.17"
 
 # The sample types the write path is generic over. `core:datatype`'s `c` prefix
 # means an interleaved I/Q pair, and Complex<T> is what the ecosystem already

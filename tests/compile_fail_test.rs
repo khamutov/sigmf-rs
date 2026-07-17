@@ -1,6 +1,6 @@
 //! Guarantees that only a compiler can check.
 //!
-//! The seal on [`sigmf::sigmf::Sample`] is a compile-time property: it says that
+//! The seal on [`sigmf::Sample`] is a compile-time property: it says that
 //! certain code does not exist, and no test that runs can observe the absence of
 //! code. `trybuild` compiles each file in `tests/ui/` and asserts it fails with the
 //! error recorded in the matching `.stderr`.

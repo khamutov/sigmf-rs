@@ -5,7 +5,7 @@
 //! recording written through it would misdescribe its own Dataset while passing
 //! through a signature that looks like it checked.
 
-use sigmf::sigmf::Sample;
+use sigmf::Sample;
 
 #[derive(Clone, Copy)]
 struct EightByteThing {

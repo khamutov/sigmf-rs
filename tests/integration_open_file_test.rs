@@ -1,7 +1,7 @@
 use std::{collections::BTreeMap, error::Error};
 
 use pretty_assertions::assert_eq;
-use sigmf::sigmf::*;
+use sigmf::*;
 
 #[test]
 fn test_open_file() -> Result<(), Box<dyn Error>> {

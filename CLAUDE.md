@@ -123,6 +123,18 @@ mistake that actually differs — and the test caught that immediately. A mutati
 that changes no behaviour proves nothing in either direction, so when one survives,
 the first question is whether it changed anything at all.
 
+Some properties here are compile-time and no runtime assertion can reach them: that
+`Sample` cannot be implemented downstream, that every fallible method's error
+converts into `Error`, that the error types are `Send + Sync`. Their tests assert by
+*existing* — a `?`, a trait bound, a `trybuild` fixture — and a mutation against one
+is caught by the build failing rather than by a test printing FAILED. That makes a
+second question worth asking, because a red build is easy to over-credit: **check
+the build broke at the assertion and not upstream of it.** A mutation that fails to
+compile inside `src/` has demonstrated that the mutation is malformed, and nothing
+whatever about the test. Read the error's path and the "required by a bound in ..."
+note before recording the catch — the test that names the property should be the
+thing rustc points at.
+
 # Code conventions
 
 ## Comments & docs
@@ -145,6 +157,30 @@ the first question is whether it changed anything at all.
   and goes stale for us the moment the plan is archived. **Inline the decision
   itself** — state the defect and the condition that clears it, in words that mean
   something to someone who has only this repository.
+
+## Errors
+
+- No public signature returns `Box<dyn Error>`. It is not `Send`, not `Sync`, and
+  does not implement `Error`, so a caller cannot put one in an `anyhow::Error` or
+  carry it out of a spawned task — and this crate is called from receivers' capture
+  loops. Two types carry everything: `Error` for anything that touches a file, and
+  `MetadataError` for a document that says something that does not work.
+- The split is not stylistic. `MetadataError` has no `Io` variant because
+  `Metadata::capture_boundaries` does arithmetic on a struct and could never
+  produce one, and an error type that can express a state its function cannot reach
+  is the same defect as a struct field that can only ever hold a default. Both got
+  deleted from this crate; do not reintroduce either shape.
+- An `Io` error carries the path it happened to, because `std::io::Error` has none
+  and the caller often does not either — the Dataset's name is *derived* from the
+  Metadata file's, and `to_file` derives both of its files from a basename. Parse
+  errors carry no path deliberately: the only document parsed from a file is the one
+  `from_file` was handed, so the caller already holds it.
+- A variant whose payload is a `String` of prose is not an error, it is a log line.
+  Give it fields. `Internal(String)` is gone.
+- A function that cannot fail returns no `Result`. `delete_extension` promised a
+  `MetadataError` from a body with a single `Ok(())` exit and no fallible call in it,
+  which bought every call site a `?` guarding nothing. Fallibility inherited from a
+  dependency's signature — `serde_json::to_string` — is real and stays.
 
 ## Tests
 
