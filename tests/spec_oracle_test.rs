@@ -986,7 +986,7 @@ mod write_path {
             );
 
             let basename = dir.path().join(label);
-            RecordingWriter::new(&[sample])
+            RecordingWriter::new(&[sample], 32_000.0)
                 .to_file(&basename)
                 .expect("writing must succeed");
 
@@ -1315,7 +1315,7 @@ mod read_path {
             name: &str,
         ) {
             let basename = dir.path().join(name);
-            let mut writer = RecordingWriter::new(samples);
+            let mut writer = RecordingWriter::new(samples, 32_000.0);
             writer.captures_mut().push(CaptureMetadata::new(0));
             writer
                 .to_file(&basename)

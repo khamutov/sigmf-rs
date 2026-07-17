@@ -1,16 +1,18 @@
 //! Contracts of the write path.
 //!
-//! A [`RecordingWriter`] starts from the one thing a writer must have — the
-//! samples — and derives everything derivable from them, most importantly
-//! `core:datatype`. These tests pin that shape: no placeholder datatype to
-//! invent, no claim that can reach the file, and a round-trip that carries the
-//! whole document through.
+//! A [`RecordingWriter`] starts from what a fresh Recording of real samples
+//! must have — the samples and the rate they were sampled at — and derives
+//! everything derivable, most importantly `core:datatype`. These tests pin
+//! that shape: no placeholder datatype to invent, no claim that can reach the
+//! file, no way to omit the one field that would leave the Dataset time-less,
+//! and a round-trip that carries the whole document through.
 
 use serde_json::{json, Value};
 use sigmf::num_complex::Complex;
 use sigmf::Endianness::BigEndian;
 use sigmf::{
-    CaptureMetadata, Error, GlobalMetadata, MetadataError, RecordingWriter, SigMF, SIGMF_VERSION,
+    CaptureMetadata, Error, GlobalMetadata, Metadata, MetadataError, RecordingWriter, SigMF,
+    SIGMF_VERSION,
 };
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -37,18 +39,20 @@ fn read_json(path: &Path) -> Value {
         .expect("the file must hold JSON")
 }
 
-/// The ordinary write asks for the samples and nothing else. The datatype is
-/// not among the inputs anywhere: it is a function of the sample type, and the
-/// writer is the one place that knows the sample type at construction.
+/// The ordinary write asks for the samples and their rate, and nothing else.
+/// The two inputs are opposites: the datatype is a function of the sample type
+/// and so is never asked for, while the rate is a fact about the capture that
+/// nothing in a `&[S]` records — so the writer must ask, or the one field that
+/// places the Dataset in time would be left to be forgotten.
 #[test]
-fn a_writer_needs_only_the_samples() {
+fn a_writer_needs_the_samples_and_their_rate() {
     let dir = TempDir::new().expect("a temp dir");
     let basename = dir.path().join("dsc_watch");
 
     let samples = dsc_samples();
-    let mut writer = RecordingWriter::new(&samples);
-    writer.global_mut().sample_rate = Some(32_000.0);
-    writer.to_file(&basename).expect("writing must succeed");
+    RecordingWriter::new(&samples, 32_000.0)
+        .to_file(&basename)
+        .expect("writing must succeed");
 
     let reopened =
         SigMF::from_file(sibling(&basename, ".sigmf-meta")).expect("the recording must reopen");
@@ -61,6 +65,35 @@ fn a_writer_needs_only_the_samples() {
     assert_eq!(reopened.metadata.global.sample_rate, Some(32_000.0));
 }
 
+/// A stated rate the schema would reject is refused before either file exists.
+///
+/// The schema bounds `core:sample_rate` to a positive number of at most 10¹²
+/// samples per second. Zero, a negative rate, NaN, or infinity would produce a
+/// Recording that every schema-checking reader rejects — so the writer rejects
+/// it first, while the caller is still on the stack that knows where the rate
+/// came from.
+#[test]
+fn a_rate_the_schema_would_reject_never_reaches_a_file() {
+    let dir = TempDir::new().expect("a temp dir");
+    let basename = dir.path().join("dsc_watch");
+
+    let samples = dsc_samples();
+    for rate in [0.0, -32_000.0, f64::NAN, f64::INFINITY, 2.0e12] {
+        let err = RecordingWriter::new(&samples, rate)
+            .to_file(&basename)
+            .expect_err("the schema rejects this rate, so the writer must too");
+        assert!(
+            matches!(err, Error::Metadata(MetadataError::SampleRateOutOfRange(_))),
+            "expected SampleRateOutOfRange for rate {rate}, got: {err:?}"
+        );
+        assert!(
+            !sibling(&basename, ".sigmf-data").exists()
+                && !sibling(&basename, ".sigmf-meta").exists(),
+            "a refused write must leave nothing behind (rate {rate})"
+        );
+    }
+}
+
 /// `global_mut` is an escape hatch to every Global field, and the one field it
 /// cannot smuggle into the file is the datatype: the writer derives that from
 /// the samples at the moment of writing, which is the crate's central
@@ -71,7 +104,7 @@ fn the_datatype_written_describes_the_samples_not_a_claim() {
     let basename = dir.path().join("dsc_watch");
 
     let samples = dsc_samples();
-    let mut writer = RecordingWriter::new(&samples);
+    let mut writer = RecordingWriter::new(&samples, 32_000.0);
     writer.global_mut().datatype = "ri16_le".parse().expect("a valid datatype");
     writer.to_file(&basename).expect("writing must succeed");
 
@@ -91,7 +124,7 @@ fn to_file_returns_the_recording_it_wrote() {
     let basename = dir.path().join("dsc_watch");
 
     let samples = dsc_samples();
-    let written = RecordingWriter::new(&samples)
+    let written = RecordingWriter::new(&samples, 32_000.0)
         .to_file(&basename)
         .expect("writing must succeed");
 
@@ -116,7 +149,7 @@ fn the_byte_order_option_is_stated_in_the_datatype() {
     let basename = dir.path().join("dsc_watch");
 
     let samples = dsc_samples();
-    RecordingWriter::new(&samples)
+    RecordingWriter::new(&samples, 32_000.0)
         .endianness(BigEndian)
         .to_file(&basename)
         .expect("writing must succeed");
@@ -141,7 +174,7 @@ fn checksum_off_clears_a_hash_rather_than_leaving_it_stale() {
     let rewrite = dir.path().join("rewrite");
 
     let samples = dsc_samples();
-    let first = RecordingWriter::new(&samples)
+    let first = RecordingWriter::new(&samples, 32_000.0)
         .to_file(&basename)
         .expect("writing must succeed");
     assert!(first.metadata.global.sha512.is_some(), "on by default");
@@ -168,8 +201,7 @@ fn with_metadata_carries_the_whole_document_through() {
     let copy = dir.path().join("copy");
 
     let samples = dsc_samples();
-    let mut writer = RecordingWriter::new(&samples);
-    writer.global_mut().sample_rate = Some(32_000.0);
+    let mut writer = RecordingWriter::new(&samples, 32_000.0);
     writer.global_mut().description = Some("DSC watch on 16 MHz".to_string());
     let mut capture = CaptureMetadata::new(0);
     capture.frequency = Some(16_804_500.0);
@@ -214,7 +246,7 @@ fn with_metadata_keeps_the_byte_order_it_was_handed() {
     let copy = dir.path().join("copy");
 
     let samples = dsc_samples();
-    let first = RecordingWriter::new(&samples)
+    let first = RecordingWriter::new(&samples, 32_000.0)
         .endianness(BigEndian)
         .to_file(&basename)
         .expect("writing must succeed");
@@ -233,6 +265,33 @@ fn with_metadata_keeps_the_byte_order_it_was_handed() {
     );
 }
 
+/// `with_metadata` stays as general as the specification, which makes
+/// `core:sample_rate` optional. A document that omits it — a recovered capture
+/// whose rate is unknown, say — still writes, and no rate is invented for it.
+/// Only [`RecordingWriter::new`] insists on a rate, because samples presented
+/// as freshly recorded were sampled at one.
+#[test]
+fn with_metadata_may_omit_the_rate_the_spec_does_not_require() {
+    let dir = TempDir::new().expect("a temp dir");
+    let basename = dir.path().join("recovered");
+
+    let samples = dsc_samples();
+    let metadata = Metadata {
+        global: GlobalMetadata::describing("cf32_le".parse().expect("a valid datatype")),
+        captures: vec![],
+        annotations: vec![],
+    };
+    RecordingWriter::with_metadata(&samples, metadata)
+        .to_file(&basename)
+        .expect("a document without a rate is spec-valid and must write");
+
+    let written = read_json(&sibling(&basename, ".sigmf-meta"));
+    assert!(
+        written["global"].get("core:sample_rate").is_none(),
+        "and no rate may be invented for it"
+    );
+}
+
 /// A flat `&[S]` is one channel by construction, so a Global claiming several
 /// channels describes something the writer cannot honestly write.
 #[test]
@@ -241,7 +300,7 @@ fn a_flat_slice_cannot_claim_channels() {
     let basename = dir.path().join("dsc_watch");
 
     let samples = dsc_samples();
-    let mut writer = RecordingWriter::new(&samples);
+    let mut writer = RecordingWriter::new(&samples, 32_000.0);
     writer.global_mut().num_channels = Some(2);
     let err = writer
         .to_file(&basename)

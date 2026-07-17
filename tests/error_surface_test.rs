@@ -208,7 +208,7 @@ fn every_fallible_method_converges_on_one_error_type() -> Result<(), Error> {
     let basename = dir.path().join("convergence");
 
     let samples = [Complex::new(1.0f32, 0.0)];
-    let mut writer = RecordingWriter::new(&samples);
+    let mut writer = RecordingWriter::new(&samples, 32_000.0);
     writer.global_mut().set_extension(AntennaGlobal {
         model: "Wellbrook ALA1530".to_string(),
         ..Default::default()

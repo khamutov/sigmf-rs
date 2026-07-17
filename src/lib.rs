@@ -25,8 +25,7 @@
 //!
 //! let samples = vec![Complex::new(1.0f32, 0.0), Complex::new(0.0, -1.0)];
 //!
-//! let mut writer = RecordingWriter::new(&samples);
-//! writer.global_mut().sample_rate = Some(32_000.0);
+//! let mut writer = RecordingWriter::new(&samples, 32_000.0);
 //! writer.global_mut().recorder = Some("winradio-agent".to_string());
 //!
 //! // Writes `dsc_watch.sigmf-data` and `dsc_watch.sigmf-meta`.
@@ -257,7 +256,7 @@ mod sigmf {
         /// # let basename = dir.path().join("capture");
         ///
         /// let samples = [Complex::new(1.0f32, 0.0)];
-        /// RecordingWriter::new(&samples).to_file(&basename)?;
+        /// RecordingWriter::new(&samples, 32_000.0).to_file(&basename)?;
         ///
         /// let reopened = SigMF::from_file(dir.path().join("capture.sigmf-meta"))?;
         /// assert_eq!(reopened.samples::<Complex<f32>>()?, samples);
@@ -430,9 +429,10 @@ mod sigmf {
     /// Writes a Recording: samples in hand, two files out.
     ///
     /// The write-path counterpart of [`SigMF`], which opens Recordings. A writer
-    /// starts from the one thing every write must have — the samples — and derives
-    /// `core:datatype` from their type, so there is no placeholder to invent and no
-    /// claim that can drift from the bytes. Everything else about the document is
+    /// starts from what every fresh Recording must have — the samples, and the rate
+    /// they were taken at — and derives `core:datatype` from the sample type, so
+    /// there is no placeholder to invent and no claim that can drift from the
+    /// bytes. Everything else about the document is
     /// reachable through [`global_mut`](Self::global_mut),
     /// [`captures_mut`](Self::captures_mut), and
     /// [`annotations_mut`](Self::annotations_mut); the two write options are the
@@ -448,9 +448,7 @@ mod sigmf {
     /// # let basename = dir.path().join("dsc_watch");
     ///
     /// let samples = vec![Complex::new(0.0f32, 1.0); 32];
-    /// let mut writer = RecordingWriter::new(&samples);
-    /// writer.global_mut().sample_rate = Some(32_000.0);
-    /// writer.to_file(&basename)?;
+    /// RecordingWriter::new(&samples, 32_000.0).to_file(&basename)?;
     /// # Ok::<(), sigmf::Error>(())
     /// ```
     #[derive(Debug)]
@@ -462,22 +460,30 @@ mod sigmf {
     }
 
     impl<'a, S: Sample> RecordingWriter<'a, S> {
-        /// A writer for a fresh Recording of `samples`.
+        /// A writer for a fresh Recording of `samples`, taken at `sample_rate`
+        /// samples per second.
         ///
-        /// The datatype is not among the inputs, here or anywhere: `samples`
-        /// already knows it. Little-endian and checksummed unless
-        /// [`endianness`](Self::endianness) or [`checksum`](Self::checksum) says
-        /// otherwise.
-        pub fn new(samples: &'a [S]) -> Self {
+        /// The two inputs are opposites. The datatype is *not* among them, here
+        /// or anywhere: `samples` already knows it. The rate must be, because
+        /// nothing in a `&[S]` records it — and `core:sample_rate` is the field
+        /// that places the Dataset in time, without which it cannot be
+        /// demodulated, resampled, or annotated in seconds. The specification
+        /// itself leaves the field optional; a document that honestly lacks a
+        /// rate goes through [`with_metadata`](Self::with_metadata).
+        ///
+        /// Little-endian and checksummed unless [`endianness`](Self::endianness)
+        /// or [`checksum`](Self::checksum) says otherwise.
+        pub fn new(samples: &'a [S], sample_rate: f64) -> Self {
+            // The datatype seeded here is re-derived by `to_file`, where the
+            // final byte order is known; it exists so the document is complete
+            // from the first moment `global_mut` can see it.
+            let mut global =
+                GlobalMetadata::describing(DataFormat::of::<S>(Endianness::LittleEndian));
+            global.sample_rate = Some(sample_rate);
             Self {
                 samples,
-                // The datatype seeded here is re-derived by `to_file`, where the
-                // final byte order is known; it exists so the document is complete
-                // from the first moment `global_mut` can see it.
                 metadata: Metadata {
-                    global: GlobalMetadata::describing(DataFormat::of::<S>(
-                        Endianness::LittleEndian,
-                    )),
+                    global,
                     captures: vec![],
                     annotations: vec![],
                 },
@@ -568,7 +574,7 @@ mod sigmf {
         /// # let basename = dir.path().join("capture");
         ///
         /// let samples = [Complex::new(1.0f32, 0.0)];
-        /// let mut writer = RecordingWriter::new(&samples);
+        /// let mut writer = RecordingWriter::new(&samples, 32_000.0);
         /// // A claim of 16-bit real samples, handed complex 32-bit floats.
         /// writer.global_mut().datatype = "ri16_le".parse().expect("a valid datatype");
         /// let written = writer.to_file(&basename)?;
@@ -591,8 +597,10 @@ mod sigmf {
         ///
         /// Returns [`MetadataError::MultiChannelDataset`] if `core:num_channels`
         /// is set to anything but 1 (see the SigMF specification's advice to use
-        /// Collections instead), or [`Error::Io`] if either file cannot be
-        /// written.
+        /// Collections instead), [`MetadataError::SampleRateOutOfRange`] if a
+        /// stated `core:sample_rate` is outside the schema's bounds — a positive
+        /// number of at most 10¹² — or [`Error::Io`] if either file cannot be
+        /// written. A refused write leaves no file behind.
         pub fn to_file<P: AsRef<Path>>(mut self, basename: P) -> Result<SigMF, Error> {
             // A `&[S]` is one channel by construction: nothing in the slice can say
             // where one channel ends and the next begins, so honouring
@@ -601,6 +609,17 @@ mod sigmf {
             if let Some(channels) = self.metadata.global.num_channels {
                 if channels != 1 {
                     return Err(MetadataError::MultiChannelDataset(channels).into());
+                }
+            }
+
+            // A rate is optional — a document handed to `with_metadata` may
+            // honestly not know it — but a stated one must be within the schema's
+            // bounds, or the file would fail validation in every reader that
+            // checks. Negated comparison rather than its inverse so that NaN
+            // lands on the refusing side.
+            if let Some(rate) = self.metadata.global.sample_rate {
+                if !(rate > 0.0 && rate <= 1e12) {
+                    return Err(MetadataError::SampleRateOutOfRange(rate).into());
                 }
             }
 
@@ -1601,6 +1620,15 @@ mod sigmf {
              for widest application support"
         )]
         MultiChannelDataset(u64),
+
+        /// A rate outside the range the schema permits for `core:sample_rate` was
+        /// asked to be written.
+        #[error(
+            "cannot write `core:sample_rate` = {0}: the specification bounds it to a \
+             positive number of at most 10^12 samples per second, and a Recording \
+             carrying this value would be rejected by every schema-checking reader"
+        )]
+        SampleRateOutOfRange(f64),
 
         /// A Dataset was asked for as a Rust type that its `core:datatype` does not
         /// describe.

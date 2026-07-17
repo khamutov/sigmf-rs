@@ -21,9 +21,9 @@ use sigmf::{RecordingWriter, SigMF};
 
 let samples = vec![Complex::new(1.0f32, 0.0), Complex::new(0.0, -1.0)];
 
-// The writer knows the sample type, so `core:datatype` is nobody's input.
-let mut writer = RecordingWriter::new(&samples);
-writer.global_mut().sample_rate = Some(32_000.0);
+// The writer asks for the two things only the caller knows — the samples and
+// their rate. `core:datatype` is nobody's input: the writer knows the sample type.
+let mut writer = RecordingWriter::new(&samples, 32_000.0);
 writer.global_mut().recorder = Some("winradio-agent".to_string());
 
 // Writes dsc_watch.sigmf-data and dsc_watch.sigmf-meta.
