@@ -610,48 +610,47 @@ fn set_extension_declares_the_extension_it_writes() {
 /// One claim runs through all of them, and it is the claim the typed write path
 /// exists to make: `core:datatype` and `core:sha512` describe the Dataset that was
 /// actually written, and cannot be talked into describing anything else.
+/// A Recording of a coast-station DSC watch on 16 MHz at 32 kSa/s — the case this
+/// crate was written to serve, and the one `realistic_recording.sigmf-meta`
+/// describes.
+///
+/// `datatype` is the caller's *claim*, and it is a parameter because several tests
+/// hand in a claim that is false and assert the written file contradicts it.
+fn a_dsc_watch_recording(datatype: &str) -> SigMF {
+    let mut global = GlobalMetadata::new(datatype.parse().expect("a valid datatype"));
+    global.sample_rate = Some(32_000.0);
+    global.recorder = Some("winradio-agent".to_string());
+
+    SigMF::new(Metadata {
+        global,
+        captures: vec![serde_json::from_value(json!({
+            "core:sample_start": 0,
+            "core:frequency": 16_804_500.0,
+            "core:datetime": "2026-07-16T09:14:22.000Z",
+        }))
+        .expect("the capture literal must deserialize")],
+        annotations: vec![],
+    })
+}
+
+/// Samples with no two components alike, so that a test can tell in-phase from
+/// quadrature, and one byte order from the other.
+fn dsc_samples() -> Vec<Complex<f32>> {
+    vec![
+        Complex::new(1.0, -2.0),
+        Complex::new(0.5, 0.25),
+        Complex::new(-1.5, 3.0),
+    ]
+}
+
+/// Where a Recording's two files land, worked out independently of the crate's own
+/// helper so that a mistake in that helper cannot hide behind this one.
+fn sibling(basename: &Path, extension: &str) -> PathBuf {
+    PathBuf::from(format!("{}{extension}", basename.display()))
+}
+
 mod write_path {
     use super::*;
-
-    /// A Recording of a coast-station DSC watch on 16 MHz at 32 kSa/s — the case
-    /// this crate was written to serve, and the one `realistic_recording.sigmf-meta`
-    /// describes.
-    ///
-    /// `datatype` is the caller's *claim*, and it is a parameter because several
-    /// tests below hand in a claim that is false and assert the written file
-    /// contradicts it.
-    fn a_dsc_watch_recording(datatype: &str) -> SigMF {
-        let mut global = GlobalMetadata::new(datatype.parse().expect("a valid datatype"));
-        global.sample_rate = Some(32_000.0);
-        global.recorder = Some("winradio-agent".to_string());
-
-        SigMF::new(Metadata {
-            global,
-            captures: vec![serde_json::from_value(json!({
-                "core:sample_start": 0,
-                "core:frequency": 16_804_500.0,
-                "core:datetime": "2026-07-16T09:14:22.000Z",
-            }))
-            .expect("the capture literal must deserialize")],
-            annotations: vec![],
-        })
-    }
-
-    /// Samples with no two components alike, so that a test can tell in-phase from
-    /// quadrature, and one byte order from the other.
-    fn dsc_samples() -> Vec<Complex<f32>> {
-        vec![
-            Complex::new(1.0, -2.0),
-            Complex::new(0.5, 0.25),
-            Complex::new(-1.5, 3.0),
-        ]
-    }
-
-    /// Where `to_file` puts a file, worked out independently of the crate's own
-    /// helper so that a mistake in that helper cannot hide behind this one.
-    fn sibling(basename: &Path, extension: &str) -> PathBuf {
-        PathBuf::from(format!("{}{extension}", basename.display()))
-    }
 
     fn hex(bytes: &[u8]) -> String {
         bytes.iter().fold(String::new(), |mut out, byte| {
@@ -1021,5 +1020,352 @@ mod write_path {
         check(&dir, Complex::new(1u16, 2), "cu16");
         check(&dir, Complex::new(1i8, 2), "ci8");
         check(&dir, Complex::new(1u8, 2), "cu8");
+    }
+}
+
+/// The same guarantee, arriving from the other direction.
+///
+/// `core:datatype` is the Recording's own account of what its bytes mean, and a
+/// reader that takes the caller's word instead fails exactly as a writer would:
+/// silently, with plausible numbers. These tests judge what the crate does when the
+/// two disagree — and what it does to find a Dataset before it can read one.
+mod read_path {
+    use super::*;
+
+    /// The Dataset of `sample.sigmf-meta`, decoded by hand.
+    ///
+    /// This fixture predates every line of the read path and was not produced by it:
+    /// 64 bytes of `rf32_le` holding the integers 0 through 15. That independence is
+    /// the point. A round-trip test cannot tell a correct codec from one whose
+    /// encode and decode are wrong in the same direction; bytes someone else wrote
+    /// can.
+    fn sample_fixture_samples() -> Vec<f32> {
+        (0..16).map(|n| n as f32).collect()
+    }
+
+    /// Byte boundaries, on the fixture that used to answer `(0, 0)` for them.
+    ///
+    /// The Dataset is 64 bytes and the sole segment starts at sample 0, so the
+    /// answer is the whole file. It used to be `(0, 0)` — not because anything
+    /// computed zero, but because `from_file` computed nothing and the field held
+    /// its default. `(0, 0)` is at least visibly absurd; the arithmetic standing in
+    /// for it can be subtly wrong instead, which is why the answer now comes from a
+    /// method that will not speak without the Dataset's length.
+    #[test]
+    fn the_boundaries_of_a_real_recording_cover_its_real_dataset() {
+        let sigmf = SigMF::from_file(fixture_path("sample.sigmf-meta")).expect("must open");
+
+        let dataset_len = fs::metadata(fixture_path("sample.sigmf-data"))
+            .expect("the fixture's dataset must exist")
+            .len();
+        assert_eq!(
+            dataset_len, 64,
+            "the fixture must be the one this test describes"
+        );
+
+        assert_eq!(
+            sigmf.capture_boundaries().expect("boundaries must compute"),
+            vec![0..64],
+        );
+    }
+
+    /// Samples out of a file this crate did not write.
+    #[test]
+    fn a_real_recording_decodes_to_the_samples_it_holds() {
+        let sigmf = SigMF::from_file(fixture_path("sample.sigmf-meta")).expect("must open");
+
+        assert_eq!(
+            sigmf.samples::<f32>().expect("rf32_le must read as f32"),
+            sample_fixture_samples(),
+        );
+    }
+
+    /// The read path refuses what the write path refuses, and names both formats.
+    #[test]
+    fn reading_a_dataset_as_the_wrong_type_is_refused_and_names_both_formats() {
+        let sigmf = SigMF::from_file(fixture_path("sample.sigmf-meta")).expect("must open");
+
+        // The fixture is `rf32_le`: 16 real floats. Asked for complex 16-bit
+        // integers, those same 64 bytes would "decode" to 16 samples of noise with
+        // nothing anywhere reporting a problem.
+        let err = sigmf
+            .samples::<Complex<i16>>()
+            .expect_err("ri16_le bytes must not be conjured out of an rf32_le dataset");
+        let message = err.to_string();
+        assert!(
+            message.contains("rf32_le"),
+            "the error must name what the Recording says it is: {message}"
+        );
+        assert!(
+            message.contains("ci16_le"),
+            "the error must name what was asked for: {message}"
+        );
+    }
+
+    /// Reading a Recording's metadata does not read its Dataset.
+    ///
+    /// Not a statement about performance. The only way to get correct boundaries
+    /// used to be `Metadata::from_str`, which demanded the whole Dataset as a
+    /// `&Vec<u8>` in order to read `.len()` off it — so metadata for a
+    /// hundred-gigabyte Recording cost a hundred gigabytes of memory. Nothing here
+    /// could run at all if that were still so: this fixture's Dataset does not
+    /// exist.
+    #[test]
+    fn metadata_opens_without_a_dataset_to_open() {
+        let dataset = fixture_path("realistic_recording.sigmf-data");
+        assert!(
+            !dataset.exists(),
+            "this test is vacuous unless {} is absent",
+            dataset.display()
+        );
+
+        let sigmf = SigMF::from_file(fixture_path("realistic_recording.sigmf-meta"))
+            .expect("metadata must open with no dataset beside it");
+        assert_eq!(sigmf.metadata.global.sample_rate, Some(32_000.0));
+
+        // And the absence is reported when the Dataset is finally wanted, rather
+        // than papered over with an empty result.
+        assert!(
+            sigmf.samples::<Complex<f32>>().is_err(),
+            "samples must not be invented for a dataset that is not there"
+        );
+    }
+
+    /// A Recording written and then read back, typed on both ends.
+    #[test]
+    fn samples_survive_a_write_and_a_read() {
+        let dir = TempDir::new().expect("a temp dir");
+        let basename = dir.path().join("dsc_watch");
+
+        let samples = dsc_samples();
+        let mut recording = a_dsc_watch_recording("cf32_le");
+        recording
+            .to_file(&basename, &samples)
+            .expect("writing must succeed");
+
+        let reopened =
+            SigMF::from_file(sibling(&basename, ".sigmf-meta")).expect("the recording must reopen");
+        assert_eq!(
+            reopened
+                .samples::<Complex<f32>>()
+                .expect("what we wrote must read back"),
+            samples,
+        );
+    }
+
+    /// Byte order survives the trip.
+    ///
+    /// Both halves consult `core:datatype`, so a codec ignoring byte order entirely
+    /// would pass a little-endian round-trip. This writes big-endian and checks the
+    /// bytes on disk really are big-endian before reading them back.
+    #[test]
+    fn a_big_endian_recording_reads_back_as_what_was_written() {
+        let dir = TempDir::new().expect("a temp dir");
+        let basename = dir.path().join("dsc_watch");
+
+        let samples = dsc_samples();
+        let mut recording = a_dsc_watch_recording("cf32_le");
+        recording
+            .to_file_with(
+                &basename,
+                &samples,
+                WriteOptions::default().endianness(Endianess::BigEndian),
+            )
+            .expect("writing must succeed");
+
+        let written = fs::read(sibling(&basename, ".sigmf-data")).expect("dataset");
+        assert_eq!(
+            &written[..4],
+            &samples[0].re.to_be_bytes(),
+            "the dataset must actually be big-endian, or this test proves nothing"
+        );
+
+        let reopened =
+            SigMF::from_file(sibling(&basename, ".sigmf-meta")).expect("the recording must reopen");
+        assert_eq!(
+            reopened.samples::<Complex<f32>>().expect("must read back"),
+            samples,
+        );
+    }
+
+    /// A Recording whose basename has a dot in it finds its own Dataset.
+    ///
+    /// The sibling `.sigmf-data` is named by replacing the `.sigmf-meta` extension,
+    /// which is safe only because the segment being replaced is the one just
+    /// matched. `dsc_16804.5kHz` is the case that tells that apart from an
+    /// implementation reaching for `file_stem`.
+    #[test]
+    fn a_dotted_basename_still_finds_its_dataset() {
+        let dir = TempDir::new().expect("a temp dir");
+        let basename = dir.path().join("dsc_16804.5kHz");
+
+        let samples = dsc_samples();
+        let mut recording = a_dsc_watch_recording("cf32_le");
+        recording
+            .to_file(&basename, &samples)
+            .expect("writing must succeed");
+
+        let reopened =
+            SigMF::from_file(sibling(&basename, ".sigmf-meta")).expect("the recording must reopen");
+        assert_eq!(
+            reopened.samples::<Complex<f32>>().expect("must read back"),
+            samples,
+            "the dataset beside dsc_16804.5kHz.sigmf-meta is dsc_16804.5kHz.sigmf-data"
+        );
+    }
+
+    /// `core:metadata_only` says there is no Dataset, and is believed.
+    #[test]
+    fn a_metadata_only_recording_reports_that_it_has_no_dataset() {
+        let dir = TempDir::new().expect("a temp dir");
+        let basename = dir.path().join("dsc_watch");
+
+        // Write a real Recording, then re-describe it as metadata-only. The Dataset
+        // is still sitting there on disk, so anything that goes looking will find
+        // it — which is what makes this a test of the field rather than of the file.
+        let mut recording = a_dsc_watch_recording("cf32_le");
+        recording
+            .to_file(&basename, &dsc_samples())
+            .expect("writing must succeed");
+        assert!(sibling(&basename, ".sigmf-data").exists());
+
+        let mut metadata = recording.metadata;
+        metadata.global.metadata_only = Some(true);
+        fs::write(
+            sibling(&basename, ".sigmf-meta"),
+            metadata.to_str().expect("serialize"),
+        )
+        .expect("rewriting the sidecar");
+
+        let reopened = SigMF::from_file(sibling(&basename, ".sigmf-meta"))
+            .expect("a metadata-only recording still opens");
+        let err = reopened
+            .samples::<Complex<f32>>()
+            .expect_err("a recording saying it has no dataset must not read the one beside it");
+        assert!(
+            err.to_string().contains("metadata_only"),
+            "the error should name the field that decided this: {err}"
+        );
+    }
+
+    /// `core:dataset` names a file beside the Metadata file, and nothing else.
+    ///
+    /// The schema: this field "only includes the filename, not directory", and the
+    /// Dataset "must be in the same directory as the .sigmf-meta file". A Metadata
+    /// file is a document that may have come from anywhere, so a `core:dataset` of
+    /// `../../../etc/passwd` is a document choosing what its reader opens. The
+    /// specification's own rule is the defence; this checks the crate enforces it
+    /// rather than resolving it and hoping.
+    #[test]
+    fn a_core_dataset_outside_the_directory_is_refused() {
+        let dir = TempDir::new().expect("a temp dir");
+        let basename = dir.path().join("dsc_watch");
+
+        let mut recording = a_dsc_watch_recording("cf32_le");
+        recording
+            .to_file(&basename, &dsc_samples())
+            .expect("writing must succeed");
+
+        let mut metadata = recording.metadata;
+        metadata.global.dataset = Some("../elsewhere/secrets.bin".to_string());
+        fs::write(
+            sibling(&basename, ".sigmf-meta"),
+            metadata.to_str().expect("serialize"),
+        )
+        .expect("rewriting the sidecar");
+
+        let err = SigMF::from_file(sibling(&basename, ".sigmf-meta"))
+            .expect_err("a core:dataset with a directory component must be refused");
+        assert!(
+            err.to_string().contains("only includes the filename"),
+            "the error should quote the rule it enforces: {err}"
+        );
+    }
+
+    /// A Non-Conforming Dataset is read from the file `core:dataset` names.
+    #[test]
+    fn a_core_dataset_names_the_file_that_is_read() {
+        let dir = TempDir::new().expect("a temp dir");
+
+        // An NCD: the samples live under a name of the recorder's choosing, and the
+        // sidecar is the only thing tying the two together.
+        let samples = dsc_samples();
+        let dataset: Vec<u8> = samples
+            .iter()
+            .flat_map(|s| [s.re.to_le_bytes(), s.im.to_le_bytes()])
+            .flatten()
+            .collect();
+        fs::write(dir.path().join("capture.iq"), &dataset).expect("writing the dataset");
+
+        let mut metadata = a_dsc_watch_recording("cf32_le").metadata;
+        metadata.global.dataset = Some("capture.iq".to_string());
+        let sidecar = dir.path().join("dsc_watch.sigmf-meta");
+        fs::write(&sidecar, metadata.to_str().expect("serialize")).expect("writing the sidecar");
+
+        let reopened = SigMF::from_file(&sidecar).expect("an NCD recording must open");
+        assert_eq!(
+            reopened
+                .samples::<Complex<f32>>()
+                .expect("the named dataset must be the one read"),
+            samples,
+        );
+    }
+
+    /// Every sample type reads back as what it was written as.
+    ///
+    /// Each of the sixteen has its width and its datatype pinned by the write path's
+    /// own tests. This pins that decode is `encode`'s inverse, which is a different
+    /// claim failing in a different way: a transposed in-phase/quadrature pair has
+    /// the right width and the right datatype.
+    #[test]
+    fn every_sample_type_reads_back_as_what_it_was_written_as() {
+        fn check<S: Sample + std::fmt::Debug + PartialEq>(
+            dir: &TempDir,
+            samples: &[S],
+            name: &str,
+        ) {
+            let basename = dir.path().join(name);
+            let mut recording = SigMF::new(Metadata {
+                // Overwritten from `S` by `to_file`; see the write path's tests.
+                global: GlobalMetadata::new("cf32_le".parse().expect("placeholder")),
+                captures: vec![
+                    serde_json::from_value(json!({"core:sample_start": 0})).expect("capture")
+                ],
+                annotations: vec![],
+            });
+            recording
+                .to_file(&basename, samples)
+                .unwrap_or_else(|e| panic!("writing {name}: {e}"));
+
+            let reopened = SigMF::from_file(sibling(&basename, ".sigmf-meta"))
+                .unwrap_or_else(|e| panic!("reopening {name}: {e}"));
+            assert_eq!(
+                reopened
+                    .samples::<S>()
+                    .unwrap_or_else(|e| panic!("reading {name}: {e}")),
+                samples,
+                "{name} must read back as what it was written as"
+            );
+        }
+
+        let dir = TempDir::new().expect("a temp dir");
+        // No two components alike, and none symmetric, so that a transposition or a
+        // byte-order slip cannot land back on the value it started from.
+        check(&dir, &[1.0f32, -2.5, 3.25], "rf32");
+        check(&dir, &[1.0f64, -2.5, 3.25], "rf64");
+        check(&dir, &[1i32, -2, 3], "ri32");
+        check(&dir, &[1i16, -2, 3], "ri16");
+        check(&dir, &[1u32, 2, 3], "ru32");
+        check(&dir, &[1u16, 2, 3], "ru16");
+        check(&dir, &[1i8, -2, 3], "ri8");
+        check(&dir, &[1u8, 2, 3], "ru8");
+        check(&dir, &[Complex::new(1.0f32, -2.5)], "cf32");
+        check(&dir, &[Complex::new(1.0f64, -2.5)], "cf64");
+        check(&dir, &[Complex::new(1i32, -2)], "ci32");
+        check(&dir, &[Complex::new(1i16, -2)], "ci16");
+        check(&dir, &[Complex::new(1u32, 2)], "cu32");
+        check(&dir, &[Complex::new(1u16, 2)], "cu16");
+        check(&dir, &[Complex::new(1i8, -2)], "ci8");
+        check(&dir, &[Complex::new(1u8, 2)], "cu8");
     }
 }

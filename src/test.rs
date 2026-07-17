@@ -26,8 +26,7 @@ fn test_parse_metadata() -> Result<(), Box<dyn Error>> {
           }
       ]
   }"#;
-    let data = vec![];
-    let metadata = Metadata::from_str(json_data, &data)?;
+    let metadata = Metadata::from_json(json_data)?;
     assert_eq!(
         metadata.global,
         GlobalMetadata {
@@ -68,8 +67,7 @@ fn test_parse_metadata_with_antenna() -> Result<(), Box<dyn Error>> {
             }
         ]
     }"#;
-    let data = vec![];
-    let metadata = Metadata::from_str(json_data, &data)?;
+    let metadata = Metadata::from_json(json_data)?;
     assert_eq!(
         metadata.global,
         GlobalMetadata {
@@ -116,7 +114,7 @@ fn absent_extension_reads_as_none() -> Result<(), Box<dyn Error>> {
         "captures": [],
         "annotations": []
     }"#;
-    let metadata = Metadata::from_str(json_data, &[])?;
+    let metadata = Metadata::from_json(json_data)?;
 
     assert_eq!(metadata.global.get_extension::<AntennaGlobal>()?, None);
     Ok(())
@@ -144,8 +142,7 @@ fn test_parse_roundtrip() -> Result<(), Box<dyn Error>> {
     }
   ]
 }"#;
-    let data = vec![];
-    let metadata = Metadata::from_str(json_data, &data)?;
+    let metadata = Metadata::from_json(json_data)?;
     assert_eq!(metadata.to_str()?, json_data);
     Ok(())
 }
@@ -184,8 +181,7 @@ fn test_parse_roundtrip_with_extention() -> Result<(), Box<dyn Error>> {
   "captures": [],
   "annotations": []
 }"#;
-    let data = vec![];
-    let mut metadata = Metadata::from_str(json_data, &data)?;
+    let mut metadata = Metadata::from_json(json_data)?;
 
     let mut antenna: AntennaGlobal = metadata
         .global
@@ -242,8 +238,7 @@ fn test_parse_roundtrip_with_extention_removal() -> Result<(), Box<dyn Error>> {
   "captures": [],
   "annotations": []
 }"#;
-    let data = vec![];
-    let mut metadata = Metadata::from_str(json_data, &data)?;
+    let mut metadata = Metadata::from_json(json_data)?;
 
     metadata.global.delete_extension::<AntennaGlobal>()?;
 
@@ -273,7 +268,7 @@ fn deleting_an_extension_undeclares_only_that_extension() -> Result<(), Box<dyn 
         "captures": [],
         "annotations": []
     }"#;
-    let mut metadata = Metadata::from_str(json_data, &[])?;
+    let mut metadata = Metadata::from_json(json_data)?;
 
     metadata.global.delete_extension::<AntennaGlobal>()?;
 
@@ -447,7 +442,7 @@ mod data_format {
             "captures": [],
             "annotations": []
         }"#;
-        let err = Metadata::from_str(json_data, &[])
+        let err = Metadata::from_json(json_data)
             .expect_err("a file whose datatype cannot describe any bytes must not open");
         assert!(
             err.to_string().contains("invalid SigMF datatype"),
@@ -479,11 +474,18 @@ mod data_format {
     }
 }
 
+/// Where each Captures segment's samples sit in the Dataset.
+///
+/// These tests once fed `Metadata::from_str` an 8000-byte buffer of zeroes and read
+/// the answer off a field. The buffer was never inspected — only its length was —
+/// and passing `8000` says so, which is the whole of the change to the six tests
+/// that predate this module's docs. Every expected byte range below is the number
+/// they asserted before.
 #[cfg(test)]
 mod capture_tests {
     use std::error::Error;
 
-    use crate::sigmf::Metadata;
+    use crate::sigmf::{Metadata, MetadataError};
 
     #[test]
     fn test_boundary_one() -> Result<(), Box<dyn Error>> {
@@ -500,10 +502,9 @@ mod capture_tests {
             ],
             "annotations": []
         }"#;
-        let data: Vec<u8> = vec![0; 8000];
-        let metadata = Metadata::from_str(json_data, &data)?;
+        let metadata = Metadata::from_json(json_data)?;
 
-        assert_eq!(metadata.captures[0].byte_boundaries, (0, 8000));
+        assert_eq!(metadata.capture_boundaries(8000)?[0], 0..8000);
         Ok(())
     }
 
@@ -525,10 +526,9 @@ mod capture_tests {
             ],
             "annotations": []
         }"#;
-        let data: Vec<u8> = vec![0; 8000];
-        let metadata = Metadata::from_str(json_data, &data)?;
+        let metadata = Metadata::from_json(json_data)?;
 
-        assert_eq!(metadata.captures[1].byte_boundaries, (4000, 8000));
+        assert_eq!(metadata.capture_boundaries(8000)?[1], 4000..8000);
         Ok(())
     }
 
@@ -552,11 +552,11 @@ mod capture_tests {
             ],
             "annotations": []
         }"#;
-        let data: Vec<u8> = vec![0; 8000];
-        let metadata = Metadata::from_str(json_data, &data)?;
+        let metadata = Metadata::from_json(json_data)?;
+        let boundaries = metadata.capture_boundaries(8000)?;
 
-        assert_eq!(metadata.captures[0].byte_boundaries, (6, 4006));
-        assert_eq!(metadata.captures[1].byte_boundaries, (4018, 8000));
+        assert_eq!(boundaries[0], 6..4006);
+        assert_eq!(boundaries[1], 4018..8000);
         Ok(())
     }
 
@@ -576,10 +576,9 @@ mod capture_tests {
             ],
             "annotations": []
         }"#;
-        let data: Vec<u8> = vec![0; 8000];
-        let metadata = Metadata::from_str(json_data, &data)?;
+        let metadata = Metadata::from_json(json_data)?;
 
-        assert_eq!(metadata.captures[0].byte_boundaries, (0, 7950));
+        assert_eq!(metadata.capture_boundaries(8000)?[0], 0..7950);
         Ok(())
     }
 
@@ -602,11 +601,11 @@ mod capture_tests {
             ],
             "annotations": []
         }"#;
-        let data: Vec<u8> = vec![0; 8000];
-        let metadata = Metadata::from_str(json_data, &data)?;
+        let metadata = Metadata::from_json(json_data)?;
+        let boundaries = metadata.capture_boundaries(8000)?;
 
-        assert_eq!(metadata.captures[0].byte_boundaries, (0, 4000));
-        assert_eq!(metadata.captures[1].byte_boundaries, (4000, 7950));
+        assert_eq!(boundaries[0], 0..4000);
+        assert_eq!(boundaries[1], 4000..7950);
         Ok(())
     }
 
@@ -631,11 +630,118 @@ mod capture_tests {
             ],
             "annotations": []
         }"#;
-        let data: Vec<u8> = vec![0; 8000];
-        let metadata = Metadata::from_str(json_data, &data)?;
+        let metadata = Metadata::from_json(json_data)?;
+        let boundaries = metadata.capture_boundaries(8000)?;
 
-        assert_eq!(metadata.captures[0].byte_boundaries, (6, 4006));
-        assert_eq!(metadata.captures[1].byte_boundaries, (4018, 7950));
+        assert_eq!(boundaries[0], 6..4006);
+        assert_eq!(boundaries[1], 4018..7950);
+        Ok(())
+    }
+
+    /// Each segment's offset is absolute, and does not accumulate down the array.
+    ///
+    /// Regression test. The boundary code used to add every segment's
+    /// `core:sample_start` to a running offset, so segment `k` began
+    /// `sample_size * sum(sample_start[0..k])` bytes late. Two segments whose first
+    /// starts at sample 0 add nothing to that sum, which is why the six tests above
+    /// — all of them — agree with both the correct arithmetic and the broken kind.
+    /// Three segments do not.
+    #[test]
+    fn a_segments_offset_is_absolute_not_a_running_total() -> Result<(), Box<dyn Error>> {
+        let json_data = r#"{
+            "global": {
+                "core:datatype": "cf32_le",
+                "core:version": "1.0.0",
+                "core:num_channels": 1
+            },
+            "captures": [
+                { "core:sample_start": 0 },
+                { "core:sample_start": 100 },
+                { "core:sample_start": 500 }
+            ],
+            "annotations": []
+        }"#;
+        let metadata = Metadata::from_json(json_data)?;
+        let boundaries = metadata.capture_boundaries(8000)?;
+
+        // 8 bytes per cf32_le sample: samples 0..100, 100..500, 500..1000.
+        assert_eq!(boundaries[0], 0..800);
+        assert_eq!(boundaries[1], 800..4000);
+        assert_eq!(boundaries[2], 4000..8000);
+        Ok(())
+    }
+
+    /// An empty `captures` array is one implicit segment, not zero segments.
+    ///
+    /// The specification: `"captures": []` implies
+    /// `"captures": [{"core:sample_start": 0}]`. Answering with no boundaries would
+    /// say the Dataset holds no samples, which is a different claim than the file
+    /// makes.
+    #[test]
+    fn an_empty_captures_array_covers_the_whole_dataset() -> Result<(), Box<dyn Error>> {
+        let json_data = r#"{
+            "global": {
+                "core:datatype": "cf32_le",
+                "core:version": "1.0.0"
+            },
+            "captures": [],
+            "annotations": []
+        }"#;
+        let metadata = Metadata::from_json(json_data)?;
+
+        assert_eq!(metadata.capture_boundaries(8000)?, vec![0..8000]);
+        Ok(())
+    }
+
+    /// A segment cannot describe bytes the Dataset does not have.
+    ///
+    /// Left unchecked this is not merely a wrong number: `samples()` slices the
+    /// Dataset by these ranges, so an out-of-range end is a panic on a malformed
+    /// file.
+    #[test]
+    fn a_segment_reaching_past_the_dataset_is_refused() -> Result<(), Box<dyn Error>> {
+        let json_data = r#"{
+            "global": {
+                "core:datatype": "cf32_le",
+                "core:version": "1.0.0"
+            },
+            "captures": [
+                { "core:sample_start": 0 },
+                { "core:sample_start": 5000 }
+            ],
+            "annotations": []
+        }"#;
+        let metadata = Metadata::from_json(json_data)?;
+
+        // Sample 5000 of a cf32_le Dataset is byte 40000; the Dataset has 8000.
+        let err = metadata
+            .capture_boundaries(8000)
+            .expect_err("a segment beyond the Dataset must not be answered with a byte range");
+        assert!(
+            matches!(err, MetadataError::CaptureOutOfBounds { index: 0, .. }),
+            "got: {err:?}"
+        );
+        Ok(())
+    }
+
+    /// `core:trailing_bytes` cannot exceed the Dataset it trails.
+    #[test]
+    fn trailing_bytes_larger_than_the_dataset_are_refused() -> Result<(), Box<dyn Error>> {
+        let json_data = r#"{
+            "global": {
+                "core:datatype": "cf32_le",
+                "core:version": "1.0.0",
+                "core:trailing_bytes": 9000
+            },
+            "captures": [{ "core:sample_start": 0 }],
+            "annotations": []
+        }"#;
+        let metadata = Metadata::from_json(json_data)?;
+
+        let err = metadata.capture_boundaries(8000).expect_err(
+            "trailing bytes past the start of the Dataset must not subtract to a range",
+        );
+        assert!(err.to_string().contains("trailing_bytes"), "got: {err}");
         Ok(())
     }
 }

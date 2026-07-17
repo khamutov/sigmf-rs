@@ -21,7 +21,9 @@ pub mod sigmf {
     use serde_json::Value;
     use sha2::{Digest, Sha512};
     use std::collections::BTreeMap as Map;
+    use std::ffi::OsStr;
     use std::fmt::{self, Write as _};
+    use std::ops::Range;
     use std::{
         error::Error,
         fs,
@@ -45,13 +47,120 @@ pub mod sigmf {
     }
 
     impl SigMF {
+        /// Open a Recording, given the path of its `.sigmf-meta` file.
+        ///
+        /// The Dataset is not read here, or even opened — only its path is worked
+        /// out, by the rules in [`dataset_path`]. Reading the metadata of a
+        /// hundred-gigabyte Recording therefore costs the size of its sidecar, and
+        /// [`samples`](Self::samples) is the call that goes to disk for the rest.
+        ///
+        /// # Errors
+        ///
+        /// Returns an I/O error if the Metadata file cannot be read, a
+        /// deserialization error if it is not a valid SigMF document — which
+        /// includes a `core:datatype` that describes no possible bytes — or
+        /// [`MetadataError::DatasetPathEscapesDirectory`] if `core:dataset` names
+        /// something other than a file beside the Metadata file.
         pub fn from_file<T: AsRef<Path>>(path: T) -> Result<Self, Box<dyn Error>> {
+            let path = path.as_ref();
             let metadata_file = fs::File::open(path)?;
-            let metadata = serde_json::from_reader(metadata_file)?;
-            Ok(Self {
-                metadata: metadata,
-                datafile: None,
-            })
+            let metadata: Metadata = serde_json::from_reader(metadata_file)?;
+            let datafile = dataset_path(path, &metadata)?;
+            Ok(Self { metadata, datafile })
+        }
+
+        /// Where each Captures segment's samples sit in the Dataset, as byte ranges.
+        ///
+        /// The Dataset is measured, not read: this needs its length and nothing
+        /// else. See [`Metadata::capture_boundaries`], which does the arithmetic
+        /// and documents it.
+        ///
+        /// # Errors
+        ///
+        /// Returns [`MetadataError::NoDataset`] if the Recording has no Dataset to
+        /// measure, an I/O error if it cannot be measured, or
+        /// [`MetadataError::CaptureOutOfBounds`] if the Metadata describes bytes
+        /// the Dataset does not have.
+        pub fn capture_boundaries(&self) -> Result<Vec<Range<u64>>, Box<dyn Error>> {
+            let path = self.datafile.as_ref().ok_or(MetadataError::NoDataset)?;
+            let dataset_len = fs::metadata(path)?.len();
+            Ok(self.metadata.capture_boundaries(dataset_len)?)
+        }
+
+        /// Every sample in the Dataset, in order, decoded as `S`.
+        ///
+        /// # `S` is checked, not assumed
+        ///
+        /// `core:datatype` must describe `S` exactly, or this errors. That check is
+        /// the whole reason the method is generic rather than handing back bytes:
+        /// reading a `cf32_le` Dataset as `ci16_le` produces no error and no
+        /// obviously wrong number, just plausible noise at the wrong scale — the
+        /// same silent-garbage failure that [`to_file`](Self::to_file) prevents on
+        /// the way out, arriving from the other direction. Nothing about a `&[u8]`
+        /// can be checked; `S` can.
+        ///
+        /// # Cost
+        ///
+        /// The whole Dataset is read into memory and decoded. That is inherent in
+        /// returning a `Vec<S>` — a caller asking for every sample has asked for
+        /// them all — but it is worth knowing before pointing this at a Recording
+        /// far larger than RAM. [`capture_boundaries`](Self::capture_boundaries)
+        /// answers where the samples are without reading any of them.
+        ///
+        /// # Errors
+        ///
+        /// [`MetadataError::DatatypeMismatch`] if `S` is not what `core:datatype`
+        /// says, [`MetadataError::MultiChannelDataset`] if the samples are
+        /// interleaved across channels and a flat `Vec<S>` would misrepresent them,
+        /// [`MetadataError::NoDataset`] if there is no Dataset to read,
+        /// [`MetadataError::PartialSample`] if a segment's bytes are not a whole
+        /// number of samples, or an I/O error.
+        pub fn samples<S: Sample>(&self) -> Result<Vec<S>, Box<dyn Error>> {
+            let datatype = self.metadata.global.datatype;
+
+            // A one-byte component has no byte order, so for `ri8`/`ru8` the
+            // argument here cannot change the answer; for every other type the
+            // stored order is the only one that could possibly match.
+            let endianness = datatype.endianness().unwrap_or(Endianess::LittleEndian);
+            let requested = DataFormat::of::<S>(endianness);
+            if requested != datatype {
+                return Err(Box::new(MetadataError::DatatypeMismatch {
+                    stored: datatype,
+                    requested,
+                }));
+            }
+
+            // The mirror of `to_file_with`'s refusal, and for the same reason: with
+            // several channels interleaved into the Dataset, one element of a
+            // `Vec<S>` is one channel's sample, and the Vec says nothing about
+            // which. Deinterleaving wants a return type that admits channels exist.
+            if let Some(channels) = self.metadata.global.num_channels {
+                if channels != 1 {
+                    return Err(Box::new(MetadataError::MultiChannelDataset(channels)));
+                }
+            }
+
+            let path = self.datafile.as_ref().ok_or(MetadataError::NoDataset)?;
+            let data = fs::read(path)?;
+            let boundaries = self.metadata.capture_boundaries(data.len() as u64)?;
+
+            let sample_size = datatype.size() as usize;
+            let mut samples = Vec::new();
+            for range in boundaries {
+                // `capture_boundaries` has already established that this range lies
+                // within the Dataset, which is what makes both the cast and the
+                // index safe.
+                let bytes = &data[range.start as usize..range.end as usize];
+                let whole_samples = bytes.chunks_exact(sample_size);
+                if !whole_samples.remainder().is_empty() {
+                    return Err(Box::new(MetadataError::PartialSample {
+                        bytes: bytes.len() as u64,
+                        datatype,
+                    }));
+                }
+                samples.extend(whole_samples.map(|sample| S::decode(endianness, sample)));
+            }
+            Ok(samples)
         }
 
         /// A Recording that describes samples not yet written.
@@ -146,6 +255,63 @@ pub mod sigmf {
         }
     }
 
+    /// The Dataset file that belongs to a Metadata file at `metadata_path`.
+    ///
+    /// `None` means the Recording has no Dataset to point at, which the
+    /// specification allows in two ways: `core:metadata_only`, which says the
+    /// Dataset was deliberately not distributed; and a Metadata file not named
+    /// `<basename>.sigmf-meta`, which is not a compliant Recording's Metadata file
+    /// and so has no derivable sibling.
+    ///
+    /// Otherwise the specification names the file twice over, and this follows both
+    /// clauses. With `core:dataset`, that field *is* the filename — the Recording is
+    /// a Non-Conforming Dataset and the name is arbitrary. Without it: "it MUST have
+    /// a compliant SigMF Dataset ... which MUST use the same base filename as the
+    /// Metadata file and use the `.sigmf-data` extension".
+    ///
+    /// Note that `Path::set_extension` is the right tool for that second clause and
+    /// the wrong one for [`append_extension`]'s job, which looks like the same job.
+    /// It replaces the last dotted segment — and here the last dotted segment is
+    /// `.sigmf-meta`, which this function has just matched, so `dsc_16804.5kHz`
+    /// keeps its `.5kHz`. Given a bare basename there is no such guarantee, and
+    /// that is precisely the case [`append_extension`] exists for.
+    fn dataset_path(
+        metadata_path: &Path,
+        metadata: &Metadata,
+    ) -> Result<Option<PathBuf>, MetadataError> {
+        if metadata.global.metadata_only == Some(true) {
+            return Ok(None);
+        }
+
+        let Some(dataset) = &metadata.global.dataset else {
+            if metadata_path.extension() != Some(OsStr::new(meta_ext())) {
+                return Ok(None);
+            }
+            return Ok(Some(metadata_path.with_extension(data_ext())));
+        };
+
+        // "note that this string only includes the filename, not directory". A value
+        // that disagrees is not just non-conformant: it is a Metadata file, possibly
+        // fetched from anywhere, directing a reader at a path of its choosing. The
+        // spec's own rule is the whole defence, so enforce it rather than resolving
+        // whatever arrives and hoping it stayed put.
+        let name = Path::new(dataset);
+        if name.file_name() != Some(name.as_os_str()) {
+            return Err(MetadataError::DatasetPathEscapesDirectory(dataset.clone()));
+        }
+        Ok(Some(metadata_path.with_file_name(name)))
+    }
+
+    /// `.sigmf-meta` without the dot, which is what [`Path::extension`] deals in.
+    fn meta_ext() -> &'static str {
+        SIGMF_METADATA_EXT.trim_start_matches('.')
+    }
+
+    /// `.sigmf-data` without the dot, which is what [`Path::set_extension`] deals in.
+    fn data_ext() -> &'static str {
+        SIGMF_DATASET_EXT.trim_start_matches('.')
+    }
+
     /// A Recording's two files share a basename with an extension **appended**.
     ///
     /// Appended, not substituted: `Path::set_extension` would turn the perfectly
@@ -220,10 +386,14 @@ pub mod sigmf {
     }
 
     impl Metadata {
-        pub fn from_str(s: &str, data: &[u8]) -> Result<Self, Box<dyn Error>> {
-            let mut metadata: Metadata = serde_json::from_str(s)?;
-            metadata.calc_capture_boundaries(data)?;
-            Ok(metadata)
+        /// Parse a `.sigmf-meta` document.
+        ///
+        /// Nothing here reads the Dataset. This function used to take its bytes so
+        /// that it could compute capture boundaries on the way past; that is now
+        /// [`capture_boundaries`](Self::capture_boundaries)' job, which asks only
+        /// for a length.
+        pub fn from_json(s: &str) -> Result<Self, Box<dyn Error>> {
+            Ok(serde_json::from_str(s)?)
         }
 
         pub fn to_str(&self) -> Result<String, Box<dyn Error>> {
@@ -231,46 +401,100 @@ pub mod sigmf {
             Ok(res)
         }
 
-        fn calc_capture_boundaries(&mut self, data: &[u8]) -> Result<(), MetadataError> {
+        /// Where each Captures segment's samples sit in a Dataset `dataset_len`
+        /// bytes long, as byte ranges.
+        ///
+        /// # Why a length, and not the Dataset
+        ///
+        /// A segment's end is defined relative to the Dataset, and the Metadata file
+        /// does not record how big the Dataset is — so the boundaries are a function
+        /// of both, and this signature says so. It asks for the length because the
+        /// length is all it reads: taking the bytes instead would mean a
+        /// hundred-gigabyte Recording needs a hundred gigabytes of memory to learn a
+        /// number `fs::metadata(path)?.len()` answers for free. Deriving this on a
+        /// method rather than storing it on [`CaptureMetadata`] is the same point
+        /// made in the type system: the Dataset's length cannot be deserialized out
+        /// of a `.sigmf-meta`, so a field claiming to hold the answer can only ever
+        /// have been given a default one.
+        ///
+        /// # Empty `captures`
+        ///
+        /// An empty Captures array does not mean the Dataset has no samples. The
+        /// specification: `"captures": []` implies `"captures": [{"core:sample_start":
+        /// 0}]` — one implicit segment covering everything — and that is what this
+        /// returns.
+        ///
+        /// # Errors
+        ///
+        /// [`MetadataError::CaptureOutOfBounds`] if a segment describes bytes the
+        /// Dataset does not have, which includes the case of segments that are not
+        /// sorted by `core:sample_start` as the specification requires.
+        pub fn capture_boundaries(
+            &self,
+            dataset_len: u64,
+        ) -> Result<Vec<Range<u64>>, MetadataError> {
+            let trailing = self.global.trailing_bytes.unwrap_or(0);
+            let last_sample_byte = dataset_len.checked_sub(trailing).ok_or_else(|| {
+                MetadataError::Internal(format!(
+                    "`core:trailing_bytes` is {trailing}, but the Dataset is only \
+                     {dataset_len} bytes long",
+                ))
+            })?;
+
             if self.captures.is_empty() {
-                return Ok(());
+                // Spelled `once` rather than `vec![0..last_sample_byte]`, which reads
+                // ambiguously — one Range to us, and the numbers 0 to n to a reader
+                // who has met `vec![0; n]` more recently. Clippy says the same.
+                return Ok(std::iter::once(0..last_sample_byte).collect());
             }
 
-            // Every capture in a recording shares one sample format: the global
+            // Every segment of a Recording shares one sample format: the global
             // `core:datatype`, already parsed at the file boundary.
             let sample_size = self.global.datatype.size();
 
-            let mut start_byte = 0;
-            let last_index = self.captures.len() - 1;
-            for index in 0..self.captures.len() {
-                let capture = &self.captures[index];
-                start_byte += capture.header_bytes.unwrap_or(0);
-                start_byte += sample_size * capture.sample_start;
-                let end_byte = if index == last_index {
-                    let last_data_byte =
-                        data.len() as i64 - self.global.trailing_bytes.unwrap_or(0) as i64;
-                    if last_data_byte < 0 {
-                        return Err(MetadataError::Internal(format!(
-                            "Trailing offset {} is bigger than data size {}",
-                            self.global.trailing_bytes.unwrap_or(0),
-                            data.len(),
-                        )));
-                    }
-                    last_data_byte as u64
-                } else {
-                    let next_capture = &self.captures[index + 1];
-                    start_byte + sample_size * next_capture.sample_start
+            let mut boundaries = Vec::with_capacity(self.captures.len());
+            // `core:sample_start` counts samples, so it cannot see the header bytes
+            // that Non-Conforming Datasets put in front of each segment. Their
+            // running total is the only thing that accumulates down this loop: every
+            // other term is absolute.
+            let mut headers = 0u64;
+            for (index, capture) in self.captures.iter().enumerate() {
+                headers += capture.header_bytes.unwrap_or(0);
+
+                // Checked, not wrapping: `core:sample_start` is a `u64` from a file,
+                // and a release build would otherwise answer a sample index near
+                // `u64::MAX` with a small, plausible, wrong byte offset.
+                let byte_of = |sample: u64| -> Result<u64, MetadataError> {
+                    sample_size
+                        .checked_mul(sample)
+                        .and_then(|offset| offset.checked_add(headers))
+                        .ok_or_else(|| {
+                            MetadataError::Internal(format!(
+                                "capture {index}: `core:sample_start` {sample} is further into \
+                                 the Dataset than a byte offset can reach",
+                            ))
+                        })
                 };
 
-                if start_byte > end_byte {
-                    return Err(MetadataError::Internal(format!(
-                        "Starting offset [{}] for capture {} is bigger than data file size [{}]",
-                        start_byte, index, end_byte,
-                    )));
+                let start = byte_of(capture.sample_start)?;
+                let end = match self.captures.get(index + 1) {
+                    // This segment runs until the next one's samples begin — minus
+                    // that segment's own header, which `byte_of` has not counted yet.
+                    Some(next) => byte_of(next.sample_start)?,
+                    None => last_sample_byte,
+                };
+
+                if start > end || end > last_sample_byte {
+                    return Err(MetadataError::CaptureOutOfBounds {
+                        index,
+                        start,
+                        end,
+                        dataset_len,
+                    });
                 }
-                self.captures[index].byte_boundaries = (start_byte, end_byte);
+                boundaries.push(start..end);
             }
-            Ok(())
+            Ok(boundaries)
         }
     }
 
@@ -412,14 +636,6 @@ pub mod sigmf {
         /// written back as nothing.
         #[serde(flatten)]
         pub other: Map<String, Value>,
-
-        #[serde(skip)]
-        #[serde(default = "default_capture_boundaries")]
-        pub byte_boundaries: (u64, u64),
-    }
-
-    fn default_capture_boundaries() -> (u64, u64) {
-        (0, 0)
     }
 
     #[derive(Debug, PartialEq, Deserialize, Serialize)]
@@ -779,9 +995,45 @@ pub mod sigmf {
         Internal(String),
         Serde(serde_json::Error),
 
-        /// A Recording declaring `core:num_channels` other than 1 was handed to the
-        /// typed write path, which has no way to express it.
+        /// A Recording declaring `core:num_channels` other than 1 met the typed
+        /// sample API, which has no way to express it in either direction.
         MultiChannelDataset(u64),
+
+        /// A Dataset was asked for as a Rust type that its `core:datatype` does not
+        /// describe.
+        DatatypeMismatch {
+            /// What the Recording says its samples are.
+            stored: DataFormat,
+            /// What the caller asked to read them as.
+            requested: DataFormat,
+        },
+
+        /// The samples of a Recording that has no Dataset file were asked for.
+        NoDataset,
+
+        /// A Captures segment describes bytes the Dataset does not have.
+        CaptureOutOfBounds {
+            /// Position of the offending segment in the `captures` array.
+            index: usize,
+            /// First byte the segment claims.
+            start: u64,
+            /// One past the last byte the segment claims.
+            end: u64,
+            /// Size of the Dataset the segment claims them from.
+            dataset_len: u64,
+        },
+
+        /// `core:dataset` names something other than a file beside the Metadata
+        /// file.
+        DatasetPathEscapesDirectory(String),
+
+        /// A Captures segment's bytes are not a whole number of samples.
+        PartialSample {
+            /// Length of the segment.
+            bytes: u64,
+            /// The format whose sample width does not divide it.
+            datatype: DataFormat,
+        },
     }
 
     impl fmt::Display for MetadataError {
@@ -793,11 +1045,47 @@ pub mod sigmf {
                 MetadataError::Serde(e) => <&serde_json::Error as std::fmt::Display>::fmt(&e, f),
                 MetadataError::MultiChannelDataset(channels) => write!(
                     f,
-                    "cannot write a Dataset with `core:num_channels` = {channels}: a typed \
-                     sample buffer is one channel, and interleaving several into it would \
-                     leave `core:datatype` describing something other than the bytes. The \
-                     specification recommends SigMF Collections over `core:num_channels` \
-                     for multi-channel IQ, for widest application support",
+                    "cannot use a typed sample buffer for a Dataset with `core:num_channels` \
+                     = {channels}: such a buffer is one channel, and interleaving several \
+                     into it would leave `core:datatype` describing something other than \
+                     the bytes. The specification recommends SigMF Collections over \
+                     `core:num_channels` for multi-channel IQ, for widest application support",
+                ),
+                MetadataError::DatatypeMismatch { stored, requested } => write!(
+                    f,
+                    "cannot read a `{stored}` Dataset as `{requested}`: `core:datatype` is \
+                     the Recording's own account of what its bytes mean, and reading them \
+                     as anything else yields plausible noise rather than an error",
+                ),
+                MetadataError::NoDataset => f.write_str(
+                    "this Recording has no Dataset file: it is either `core:metadata_only`, \
+                     or its Metadata file is not named `<basename>.sigmf-meta` and so has no \
+                     Dataset that can be named from it, or it has not been written yet",
+                ),
+                MetadataError::CaptureOutOfBounds {
+                    index,
+                    start,
+                    end,
+                    dataset_len,
+                } => write!(
+                    f,
+                    "capture {index} covers bytes {start}..{end} of a Dataset that is \
+                     {dataset_len} bytes long. The specification requires `captures` to be \
+                     sorted by `core:sample_start` ascending; a Recording whose segments are \
+                     not sorted lands here too",
+                ),
+                MetadataError::DatasetPathEscapesDirectory(name) => write!(
+                    f,
+                    "`core:dataset` is {name:?}, which is not a plain filename. The \
+                     specification says this field \"only includes the filename, not \
+                     directory\", and the Dataset \"must be in the same directory as the \
+                     .sigmf-meta file\"",
+                ),
+                MetadataError::PartialSample { bytes, datatype } => write!(
+                    f,
+                    "a capture holds {bytes} bytes, which is not a whole number of \
+                     `{datatype}` samples of {} bytes each",
+                    datatype.size(),
                 ),
             }
         }
@@ -1124,6 +1412,35 @@ pub mod sigmf {
         pub fn of<S: Sample>(endianness: Endianess) -> DataFormat {
             S::data_format(endianness)
         }
+
+        /// The byte order the samples are stored in, or `None` for the one-byte
+        /// component types, which have none.
+        ///
+        /// `None` is not "unknown" — it is the correlation `core:datatype`'s grammar
+        /// encodes and its schema regex cannot express. There is no `ri8_le` to
+        /// parse, so an `ri8` Recording has no byte order to report, and one byte
+        /// reads the same either way.
+        ///
+        /// # Examples
+        ///
+        /// ```
+        /// use sigmf::sigmf::{DataFormat, Endianess};
+        ///
+        /// assert_eq!("cf32_be".parse::<DataFormat>()?.endianness(), Some(Endianess::BigEndian));
+        /// assert_eq!("ri8".parse::<DataFormat>()?.endianness(), None);
+        /// # Ok::<(), sigmf::sigmf::ParseDataFormatError>(())
+        /// ```
+        pub fn endianness(&self) -> Option<Endianess> {
+            match self.data_type {
+                DataType::F32(e)
+                | DataType::F64(e)
+                | DataType::I32(e)
+                | DataType::I16(e)
+                | DataType::U32(e)
+                | DataType::U16(e) => Some(e),
+                DataType::I8 | DataType::U8 => None,
+            }
+        }
     }
 
     impl fmt::Display for DataFormat {
@@ -1173,6 +1490,18 @@ pub mod sigmf {
             /// the samples are already in memory when they arrive, and the checksum
             /// needs a second look at them.
             fn encode(self, endianness: Endianess, out: &mut Vec<u8>);
+
+            /// Read one sample from exactly [`DataFormat::size`](super::DataFormat::size)
+            /// bytes of Dataset, the inverse of [`encode`](Self::encode).
+            ///
+            /// Infallible because both facts that could make it fail have already
+            /// been established by the only caller: that `Self` is what
+            /// `core:datatype` says, and that `bytes` is one whole sample.
+            ///
+            /// # Panics
+            ///
+            /// If `bytes` is not exactly one sample wide.
+            fn decode(endianness: Endianess, bytes: &[u8]) -> Self;
         }
     }
 
@@ -1199,6 +1528,15 @@ pub mod sigmf {
                         Endianess::BigEndian => out.extend_from_slice(&self.to_be_bytes()),
                     }
                 }
+
+                fn decode(endianness: Endianess, bytes: &[u8]) -> Self {
+                    let mut component = [0u8; std::mem::size_of::<$component>()];
+                    component.copy_from_slice(bytes);
+                    match endianness {
+                        Endianess::LittleEndian => Self::from_le_bytes(component),
+                        Endianess::BigEndian => Self::from_be_bytes(component),
+                    }
+                }
             }
 
             impl Sample for $component {}
@@ -1215,6 +1553,14 @@ pub mod sigmf {
                     // In-phase then quadrature: the interleaving `c` denotes.
                     self.re.encode(endianness, out);
                     self.im.encode(endianness, out);
+                }
+
+                fn decode(endianness: Endianess, bytes: &[u8]) -> Self {
+                    let (re, im) = bytes.split_at(std::mem::size_of::<$component>());
+                    Complex::new(
+                        <$component as private::Sealed>::decode(endianness, re),
+                        <$component as private::Sealed>::decode(endianness, im),
+                    )
                 }
             }
 

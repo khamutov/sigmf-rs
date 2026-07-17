@@ -113,6 +113,16 @@ else, you have just learned what the test actually tests — and it was not what
 name claimed. Do this whenever a test is born green. It costs two minutes and a
 restored file.
 
+One caveat, met the first time this was done in bulk. When a break stays green,
+check that it *was* a break before concluding the test is blind. Deriving
+`foo.sigmf-data` from `foo.sigmf-meta` via `file_stem` instead of `with_extension`
+looks like a mutation and is not one: `file_stem` strips only the final extension,
+so the two agree on every input, dots and all. The test was fine; the mutation was
+the same program spelled differently. Splitting the name at its *first* dot is the
+mistake that actually differs — and the test caught that immediately. A mutation
+that changes no behaviour proves nothing in either direction, so when one survives,
+the first question is whether it changed anything at all.
+
 # Code conventions
 
 ## Comments & docs
