@@ -19,12 +19,13 @@
 //!
 //! ```
 //! use sigmf::num_complex::Complex;
-//! use sigmf::{GlobalMetadata, Metadata, SigMF};
+//! use sigmf::Endianness::LittleEndian;
+//! use sigmf::{DataFormat, GlobalMetadata, Metadata, SigMF};
 //! # let dir = tempfile::tempdir().expect("a temporary directory");
 //! # let basename = dir.path().join("dsc_watch");
 //!
 //! let mut recording = SigMF::new(Metadata {
-//!     global: GlobalMetadata::new("cf32_le".parse().expect("a valid datatype")),
+//!     global: GlobalMetadata::new(DataFormat::of::<Complex<f32>>(LittleEndian)),
 //!     captures: vec![],
 //!     annotations: vec![],
 //! });
@@ -253,12 +254,13 @@ mod sigmf {
         ///
         /// ```
         /// use sigmf::num_complex::Complex;
-        /// use sigmf::{Error, GlobalMetadata, Metadata, MetadataError, SigMF};
+        /// use sigmf::Endianness::LittleEndian;
+        /// use sigmf::{DataFormat, Error, GlobalMetadata, Metadata, MetadataError, SigMF};
         /// # let dir = tempfile::tempdir().expect("a temporary directory");
         /// # let basename = dir.path().join("capture");
         ///
         /// let mut recording = SigMF::new(Metadata {
-        ///     global: GlobalMetadata::new("cf32_le".parse().expect("a valid datatype")),
+        ///     global: GlobalMetadata::new(DataFormat::of::<Complex<f32>>(LittleEndian)),
         ///     captures: vec![],
         ///     annotations: vec![],
         /// });
@@ -422,12 +424,13 @@ mod sigmf {
         ///
         /// ```
         /// use sigmf::num_complex::Complex;
-        /// use sigmf::{Endianness, GlobalMetadata, Metadata, SigMF, WriteOptions};
+        /// use sigmf::Endianness::LittleEndian;
+        /// use sigmf::{DataFormat, Endianness, GlobalMetadata, Metadata, SigMF, WriteOptions};
         /// # let dir = tempfile::tempdir().expect("a temporary directory");
         /// # let basename = dir.path().join("capture");
         ///
         /// let mut recording = SigMF::new(Metadata {
-        ///     global: GlobalMetadata::new("cf32_le".parse().expect("a valid datatype")),
+        ///     global: GlobalMetadata::new(DataFormat::of::<Complex<f32>>(LittleEndian)),
         ///     captures: vec![],
         ///     annotations: vec![],
         /// });
@@ -1709,12 +1712,13 @@ mod sigmf {
         /// # Examples
         ///
         /// ```
-        /// use sigmf::GlobalMetadata;
+        /// use sigmf::num_complex::Complex;
+        /// use sigmf::Endianness::LittleEndian;
+        /// use sigmf::{DataFormat, GlobalMetadata};
         ///
-        /// let global = GlobalMetadata::new("cf32_le".parse()?);
+        /// let global = GlobalMetadata::new(DataFormat::of::<Complex<f32>>(LittleEndian));
         /// assert_eq!(global.datatype.to_string(), "cf32_le");
         /// assert_eq!(global.version, sigmf::SIGMF_VERSION);
-        /// # Ok::<(), sigmf::ParseDataFormatError>(())
         /// ```
         pub fn new(datatype: DataFormat) -> GlobalMetadata {
             GlobalMetadata {
@@ -1775,9 +1779,11 @@ mod sigmf {
         /// # Examples
         ///
         /// ```
-        /// use sigmf::{AntennaGlobal, GlobalMetadata};
+        /// use sigmf::num_complex::Complex;
+        /// use sigmf::Endianness::LittleEndian;
+        /// use sigmf::{AntennaGlobal, DataFormat, GlobalMetadata};
         ///
-        /// let mut global = GlobalMetadata::new("cf32_le".parse()?);
+        /// let mut global = GlobalMetadata::new(DataFormat::of::<Complex<f32>>(LittleEndian));
         /// global.set_extension(AntennaGlobal {
         ///     model: "Wellbrook ALA1530".to_string(),
         ///     ..Default::default()
@@ -1785,7 +1791,7 @@ mod sigmf {
         ///
         /// let declared = global.extensions.as_ref().expect("the namespace is declared");
         /// assert_eq!(declared[0].name, "antenna");
-        /// # Ok::<(), Box<dyn std::error::Error>>(())
+        /// # Ok::<(), sigmf::MetadataError>(())
         /// ```
         pub fn set_extension<T: GlobalExtension + serde::Serialize>(
             &mut self,

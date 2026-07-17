@@ -17,12 +17,14 @@ or someone's memory.
 
 ```rust,no_run
 use sigmf::num_complex::Complex;
-use sigmf::{GlobalMetadata, Metadata, SigMF};
+use sigmf::Endianness::LittleEndian;
+use sigmf::{DataFormat, GlobalMetadata, Metadata, SigMF};
 
-// A datatype is required to build a Global, but `to_file` derives the real one
-// from the samples and overwrites this — see below.
+// `core:datatype` is a function of the sample type, so ask for it by type rather
+// than spelling it. `to_file` derives it again from what you hand it, which is why
+// this is the one value it cannot contradict.
 let mut recording = SigMF::new(Metadata {
-    global: GlobalMetadata::new("cf32_le".parse()?),
+    global: GlobalMetadata::new(DataFormat::of::<Complex<f32>>(LittleEndian)),
     captures: vec![],
     annotations: vec![],
 });
@@ -36,7 +38,7 @@ recording.to_file("dsc_watch", &samples)?;
 // And back again. The turbofish is checked against `core:datatype`, not assumed.
 let reopened = SigMF::from_file("dsc_watch.sigmf-meta")?;
 assert_eq!(reopened.samples::<Complex<f32>>()?, samples);
-# Ok::<(), Box<dyn std::error::Error>>(())
+# Ok::<(), sigmf::Error>(())
 ```
 
 ## `core:datatype` is a claim about the bytes
