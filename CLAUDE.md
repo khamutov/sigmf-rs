@@ -16,8 +16,20 @@ Plain cargo; there is no Taskfile here.
 
     cargo test                                   # unit + integration + doc-tests
     cargo test -- --ignored                      # the known-red tests (see below)
-    cargo clippy --all-targets -- -D warnings
+    cargo clippy --all-targets --locked -- -D warnings
     cargo fmt --check
+    cargo doc --no-deps
+
+Those first four are exactly what `.github/workflows/ci.yml` runs on every push and
+pull request, so a green tree here is a green gate there.
+
+`fresh-deps.yml` is the other job, and it is not a duplicate: it runs `cargo update`
+first and so builds against the newest dependencies the manifest permits rather than
+the ones the lockfile pins. It runs weekly rather than on a PR, because a break that
+only appears with newer dependencies is not the author's fault and must not block
+their branch — see the note on frozen lockfiles at the end of this file for why the
+job exists at all. Run it by hand with `cargo update && cargo test` before touching
+anything dependency-shaped.
 
 ## The specification is the authority, and it is executable
 
@@ -25,9 +37,17 @@ Plain cargo; there is no Taskfile here.
 definition, vendored verbatim. It is not documentation — it is the test oracle:
 fixtures are validated against it before they are used to judge the crate, and
 metadata the crate writes is validated against it on the way out. Prefer
-"assert against the schema" over "read the spec and argue about intent". There is
-no prose spec left to read; upstream withdrew it and now generates its docs *from*
-this schema.
+"assert against the schema" over "read the spec and argue about intent".
+
+The schema is not merely *a* statement of the specification, it is the artefact the
+specification is generated **from**: upstream withdrew its spec document, and
+`docs-generator.py` at the repository root reads `sigmf-schema.json` and emits what
+is published at <https://sigmf.org>. Two things follow. The rendering is worth
+reading — it is this same schema with the tables laid out, at v1.2.6, the version
+vendored here — so "there is no spec to read" is wrong, and was in this file until
+M8. And the schema's `description` strings are LaTeX fragments for that generator:
+they contain `\rowcolors` and `\begin{tabular}`, so they can be read but never
+pasted into a doc comment.
 
 Refreshing it to a new spec version is a deliberate act, not a drive-by. See
 `tests/spec/README.md`.
@@ -113,6 +133,13 @@ else, you have just learned what the test actually tests — and it was not what
 name claimed. Do this whenever a test is born green. It costs two minutes and a
 restored file.
 
+This applies to a doc-test exactly as it does to a unit test, and a doc-test invites
+the failure more, because an example is written to read well and only incidentally to
+be true. The twelve here have all been broken and watched to fail — `to_file`'s
+example dies if `to_file` trusts the datatype instead of deriving it, `samples`'
+example dies if the check is removed, and the README's example dies if it names a
+method that does not exist.
+
 One caveat, met the first time this was done in bulk. When a break stays green,
 check that it *was* a break before concluding the test is blind. Deriving
 `foo.sigmf-data` from `foo.sigmf-meta` via `file_stem` instead of `with_extension`
@@ -122,6 +149,16 @@ the same program spelled differently. Splitting the name at its *first* dot is t
 mistake that actually differs — and the test caught that immediately. A mutation
 that changes no behaviour proves nothing in either direction, so when one survives,
 the first question is whether it changed anything at all.
+
+That trap is not confined to Rust, and it caught the author of this paragraph two
+milestones after it was written. To check that CI's `--locked` rejects a `Cargo.toml`
+edited without its lockfile, the manifest's `serde_json = "1.0.150"` was lowered to
+`"1.0.149"` — and `--locked` stayed silent, apparently blind. It was not: `"1.0.149"`
+means `^1.0.149`, which the locked 1.0.150 satisfies, so the lockfile was still
+correct and nothing needed re-resolving. **A version requirement is not a version.**
+The real break is a dependency the lockfile has never seen, and against that the gate
+fails immediately. Whenever a mutation survives, suspect the mutation first — in
+whatever language you wrote it, including the ones that do not look like languages.
 
 Some properties here are compile-time and no runtime assertion can reach them: that
 `Sample` cannot be implemented downstream, that every fallible method's error
@@ -148,6 +185,18 @@ thing rustc points at.
 - Document every public surface: items exported from a module, `pub` structs and
   fields, `pub fn` / `pub async fn`, and any new config field. Also document
   non-obvious internals. Self-explanatory small functions are exempt.
+- That rule is enforced by `#![deny(missing_docs)]`, and it needed to be. It was
+  house style for the crate's whole life and nothing checked it, so the score was 55
+  bare public items — including the crate root, which left docs.rs serving an empty
+  page. `cargo doc` was warning-free throughout and always would have been: rustdoc
+  warns about broken links in the docs that *exist* and says nothing about the docs
+  that do not. Do not reach for `#[allow(missing_docs)]`; write the sentence.
+- Ground field docs in the schema, but do not paste from it. Its prose is LaTeX for
+  upstream's generator, and it is sometimes wrong —
+  `antenna:voltage_standing_wave_ratio` is described as "in units of volts", and VSWR
+  is a dimensionless ratio. Where upstream is wrong, say so in the doc rather than
+  repeat it; a reader comparing our type to the schema deserves to know which of the
+  two surprised us.
 - When a comment cites authority, cite a long-lived artifact a reader can
   actually open. Here that means **the SigMF specification** — quote the schema by
   field name, or point at `tests/spec/sigmf-schema.json`.
