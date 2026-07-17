@@ -1,0 +1,45 @@
+# The gate: what must be true of every change before it lands.
+#
+# Deliberately not pinned to a `rust-toolchain.toml`. Pinning would stabilise the
+# `trybuild` expectations in tests/ui/, which record rustc's own diagnostics and so
+# can be reworded by a toolchain upgrade with nothing actually wrong. That churn is
+# the price of hearing rustc get smarter, and this crate has already paid for the
+# alternative once: a lockfile frozen at a 2023 serde kept a real bug silent for the
+# crate's entire life, because the derive that learned to diagnose it never arrived.
+# A frozen toolchain freezes lints the same way a frozen lockfile freezes derives.
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  gate:
+    name: fmt, clippy, test
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy, rustfmt
+
+      - uses: Swatinem/rust-cache@v2
+
+      - run: cargo fmt --check
+
+      # `--locked` so that a Cargo.toml edited without its lockfile fails here
+      # rather than resolving to something no one has run.
+      - run: cargo clippy --all-targets --locked -- -D warnings
+
+      # Runs the unit tests, the integration tests, the schema oracle, the
+      # compile-fail fixtures, and the doc-tests.
+      - run: cargo test --locked

@@ -1,0 +1,48 @@
+# Builds against the newest dependencies the manifest permits, rather than the ones
+# the lockfile records.
+#
+# This exists because of a specific failure. The duplicate-`serde`-rename bug in
+# `core:extensions` was, for the crate's whole life, invisible: `cargo build` was
+# clean, and everyone concluded the defect was undetectable. It was not. At
+# serde_derive 1.0.193 the duplicate produces no warning; at 1.0.228, same rustc, it
+# produces `unreachable pattern` naming the exact line. Nobody ignored a warning —
+# the lockfile predated the derive that could emit one, so there was no warning to
+# ignore. A gate that only ever builds the committed lock freezes its own diagnostics
+# along with it and would have stayed green through all of this.
+#
+# So this job is the one that can hear the ecosystem learning something. It runs on a
+# schedule rather than on pull requests: a resolution that only breaks with newer
+# dependencies is not the author's doing, blocking their branch on it would be wrong,
+# and `continue-on-error` renders as a green check with an annotation — which is the
+# same silence this job exists to end. A scheduled run that goes red mails the owner.
+name: Fresh dependencies
+
+on:
+  schedule:
+    # Mondays, 06:00 UTC.
+    - cron: "0 6 * * 1"
+  workflow_dispatch:
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  fresh:
+    name: newest permitted dependencies
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      # No dependency cache here on purpose: a cache hit would serve exactly the
+      # artefacts this job exists to avoid reusing.
+
+      - name: Update the lockfile to the newest permitted versions
+        run: cargo update
+
+      - run: cargo clippy --all-targets -- -D warnings
+
+      - run: cargo test
